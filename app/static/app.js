@@ -242,52 +242,74 @@ function drawDeck() {
   $('#acts').innerHTML = `<button class="a-undo" onclick="undoSwipe()" title="Hoàn tác">↺</button><button class="a-no" onclick="flyTop('pass')" title="Bỏ qua"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button><button class="a-like" onclick="flyTop('like')" title="Thích">💚</button><button class="a-super ${sl ? '' : 'dim'}" onclick="flyTop('super')" title="Siêu thích (còn ${sl}/ngày)">⭐<span class="scnt">${sl}</span></button>`;
   bindDrag(deck.lastElementChild);
 }
-function topCard() { const d = $('#deck'); return d && d.querySelector('.pcard:last-child'); }
+function topCard() { const d = $('#deck'); return d && [...d.querySelectorAll('.pcard:not(.flying)')].pop(); }
+function syncActs() {
+  const sl = S.user?.super_left ?? 3, sb = $('#acts .a-super'), sc = $('#acts .scnt');
+  if (sb) { sb.classList.toggle('dim', sl <= 0); sb.title = `Siêu thích (còn ${sl}/ngày)`; }
+  if (sc) sc.textContent = sl;
+}
 function bindDrag(el) {
   let sx, sy, dx = 0, dy = 0, on = false, moved = 0;
   const st = { like: el.querySelector('.stamp.like'), nope: el.querySelector('.stamp.nope'), sup: el.querySelector('.stamp.super') };
-  el.onpointerdown = e => { on = true; moved = 0; sx = e.clientX; sy = e.clientY; el.style.transition = 'none'; el.setPointerCapture(e.pointerId); };
+  el.onpointerdown = e => { on = true; moved = 0; dx = 0; dy = 0; sx = e.clientX; sy = e.clientY; el.style.transition = 'none'; el.setPointerCapture(e.pointerId); };
   el.onpointermove = e => {
     if (!on) return; dx = e.clientX - sx; dy = e.clientY - sy; moved = Math.max(moved, Math.abs(dx) + Math.abs(dy));
     el.style.transform = `translate(${dx}px,${dy}px) rotate(${dx / 16}deg)`;
     const up = dy < -40 && Math.abs(dx) < 80;
     st.like.style.opacity = up ? 0 : Math.min(1, dx / 90); st.nope.style.opacity = up ? 0 : Math.min(1, -dx / 90); st.sup.style.opacity = up ? Math.min(1, -dy / 90) : 0;
-    const nx = el.previousElementSibling; if (nx) { const p = Math.min(1, Math.hypot(dx, dy) / 150); nx.style.transform = `scale(${.95 + .05 * p}) translateY(${14 - 14 * p}px)`; }
+    const nx = el.previousElementSibling; if (nx) { const p = Math.min(1, Math.hypot(dx, dy) / 150); nx.style.transition = 'none'; nx.style.transform = `scale(${.95 + .05 * p}) translateY(${10 - 10 * p}px)`; }
   };
   el.onpointerup = () => {
     if (!on) return; on = false;
     if (moved < 6) { el.style.transition = ''; return openDetail(S.deck[0]); }
-    if (dx > 110) return fly('like', dx, dy); if (dx < -110) return fly('pass', dx, dy); if (dy < -120) return fly('super', dx, dy);
-    el.style.transition = 'transform .3s cubic-bezier(.2,1.4,.4,1)'; el.style.transform = ''; Object.values(st).forEach(s => s.style.opacity = 0);
-    const nx = el.previousElementSibling; if (nx) nx.style.transform = '';
+    if (dx > 100) return fly('like', dx, dy); if (dx < -100) return fly('pass', dx, dy); if (dy < -110) return fly('super', dx, dy);
+    el.style.transition = 'transform .28s cubic-bezier(.2,1.4,.4,1)'; el.style.transform = ''; Object.values(st).forEach(s => s.style.opacity = 0);
+    const nx = el.previousElementSibling; if (nx) { nx.style.transition = 'transform .28s ease'; nx.style.transform = ''; }
     dx = dy = 0;
   };
 }
-function flyTop(kind) { if (S.busy || !topCard()) return; fly(kind, 0, 0); }
+function flyTop(kind) { if (!topCard()) return; fly(kind, 0, 0); }
 function fly(kind, dx, dy) {
-  if (S.busy) return;
+  const el = topCard(); if (!el) return;
   if (kind === 'super' && (S.user?.super_left ?? 3) <= 0) {
-    const el = topCard(); if (el) { el.style.transition = 'transform .3s cubic-bezier(.2,1.4,.4,1)'; el.style.transform = ''; el.querySelectorAll('.stamp').forEach(s => s.style.opacity = 0); }
+    el.style.transition = 'transform .28s cubic-bezier(.2,1.4,.4,1)'; el.style.transform = ''; el.querySelectorAll('.stamp').forEach(s => s.style.opacity = 0);
     return toast('Hôm nay bạn đã dùng hết 3 lượt Siêu thích ⭐');
   }
-  S.busy = true; const el = topCard();
-  const tx = kind === 'like' ? 520 : kind === 'pass' ? -520 : dx * 2, ty = kind === 'super' ? -700 : dy + 60;
-  el.style.transition = 'transform .38s cubic-bezier(.4,0,.8,.6),opacity .38s'; el.style.opacity = 0.2;
-  el.style.transform = `translate(${tx}px,${ty}px) rotate(${kind === 'like' ? 24 : kind === 'pass' ? -24 : 0}deg)`;
-  const st = el.querySelector('.stamp.' + (kind === 'like' ? 'like' : kind === 'pass' ? 'nope' : 'super')); if (st) st.style.opacity = 1;
-  setTimeout(() => commitSwipe(kind), 300);
-}
-async function commitSwipe(kind) {
   const u = S.deck.shift(); S.last = u;
+  if (kind === 'super' && S.user) { S.user.super_left = Math.max(0, (S.user.super_left ?? 3) - 1); syncActs(); }
+  el.classList.add('flying'); el.style.pointerEvents = 'none';
+  const tx = kind === 'like' ? 520 : kind === 'pass' ? -520 : dx * 2, ty = kind === 'super' ? -700 : dy + 60;
+  el.style.transition = 'transform .32s cubic-bezier(.2,.8,.3,1), opacity .32s'; el.style.opacity = 0;
+  el.style.transform = `translate(${tx}px,${ty}px) rotate(${kind === 'like' ? 22 : kind === 'pass' ? -22 : 0}deg)`;
+  const st = el.querySelector('.stamp.' + (kind === 'like' ? 'like' : kind === 'pass' ? 'nope' : 'super')); if (st) st.style.opacity = 1;
+  setTimeout(() => el.remove(), 330);
+
+  const deck = $('#deck');
+  const next = el.previousElementSibling;
+  if (next && !next.classList.contains('flying')) {
+    next.classList.remove('s1', 's2');
+    next.style.transition = 'transform .25s cubic-bezier(.2,.9,.3,1), filter .25s';
+    next.style.transform = '';
+    bindDrag(next);
+    const third = next.previousElementSibling;
+    if (third) { third.classList.remove('s2'); third.classList.add('s1'); }
+    if (S.deck[2]) deck.insertAdjacentHTML('afterbegin', cardHTML(S.deck[2], 2));
+  } else if (!S.deck.length) {
+    setTimeout(() => { if (S.tab === 'disc' && !S.deck.length) drawDeck(); }, 220);
+  }
+  commitSwipe(u, kind);
+}
+async function commitSwipe(u, kind) {
   try {
     const d = await api('swipe', 'POST', { to: u.id, kind });
-    if (d.super_left !== undefined && S.user) S.user.super_left = d.super_left;
+    if (d.super_left !== undefined && S.user) { S.user.super_left = d.super_left; syncActs(); }
     if (d.matched) { S.last = null; refreshUnread(); showMatch(d.match); }
     else if (kind !== 'pass') toast(d.note || 'Đã gửi lượt thích 💚');
   } catch (e) { toast(e.message); }
-  S.busy = false;
-  if (!S.deck.length) { try { await loadDeck(); } catch (e) { } }
-  if (S.tab === 'disc') drawDeck();
+  if (!S.deck.length) {
+    try { await loadDeck(); } catch (e) { }
+    if (S.tab === 'disc' && !topCard()) drawDeck();
+  }
 }
 async function undoSwipe() {
   if (S.busy) return;

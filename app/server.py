@@ -43,6 +43,7 @@ HABIT_ADVICE = {
 }
 COMMISSION = {"room": 0.10, "truck": 0.12, "clean": 0.12, "used": 0.15}
 BOT_LIKE_THRESHOLD = 66
+SUPER_DAILY = 3
 
 
 # ----------------------------------------------------------------- database
@@ -612,6 +613,10 @@ class Handler(BaseHTTPRequestHandler):
         d["liked_me"] = c.execute(
             "SELECT COUNT(*) n FROM swipes s JOIN users u ON u.id=s.from_id WHERE s.to_id=? AND u.is_bot=0 AND s.kind IN('like','super')"
             " AND s.from_id NOT IN (SELECT to_id FROM swipes WHERE from_id=?)", (me["id"], me["id"])).fetchone()["n"]
+        used_super = c.execute(
+            "SELECT COUNT(*) n FROM swipes WHERE from_id=? AND kind='super' AND created>?",
+            (me["id"], time.time() - 86400)).fetchone()["n"]
+        d["super_left"] = max(0, SUPER_DAILY - used_super)
         d["counts"] = {
             "swiped": c.execute("SELECT COUNT(*) n FROM swipes WHERE from_id=?", (me["id"],)).fetchone()["n"],
             "matches": c.execute("SELECT COUNT(*) n FROM matches WHERE (a=? OR b=?) AND active=1", (me["id"], me["id"])).fetchone()["n"],
@@ -689,11 +694,13 @@ class Handler(BaseHTTPRequestHandler):
             d = user_row_to_dict(r, me)
             if d["compat"]["score"] < min_score:
                 continue
-            # người thật đã thích mình -> ưu tiên lên đầu
+            # người thật đã thích / siêu thích mình -> ưu tiên lên đầu (siêu thích trên cùng)
             liked = c.execute("SELECT kind FROM swipes WHERE from_id=? AND to_id=?", (r["id"], uid)).fetchone()
-            d["liked_you"] = bool(liked and liked["kind"] in ("like", "super"))
+            lk = liked["kind"] if liked and liked["kind"] in ("like", "super") else ""
+            d["liked_you"] = bool(lk)
+            d["liked_kind"] = lk
             out.append(d)
-        out.sort(key=lambda d: (not d["liked_you"], -d["compat"]["score"]))
+        out.sort(key=lambda d: (0 if d["liked_kind"] == "super" else (1 if d["liked_kind"] == "like" else 2), -d["compat"]["score"]))
         unis = sorted({r["university"] for r in c.execute("SELECT university FROM users WHERE onboarded=1").fetchall() if r["university"]})
         areas = sorted({r["area"] for r in c.execute("SELECT area FROM users WHERE onboarded=1 AND id!=?", (uid,)).fetchall() if r["area"]})
         return {"candidates": out[:40], "total": len(out), "universities": unis, "areas": areas}
@@ -706,9 +713,14 @@ class Handler(BaseHTTPRequestHandler):
         other = c.execute("SELECT * FROM users WHERE id=? AND id!=?", (to, uid)).fetchone()
         if not other:
             raise Err(404, "Không tìm thấy người dùng")
+        if kind == "super":
+            used = c.execute("SELECT COUNT(*) n FROM swipes WHERE from_id=? AND kind='super' AND created>?", (uid, time.time() - 86400)).fetchone()["n"]
+            if used >= SUPER_DAILY:
+                raise Err(429, f"Hôm nay bạn đã dùng hết {SUPER_DAILY} lượt Siêu thích ⭐")
         c.execute("INSERT INTO swipes(from_id,to_id,kind,created) VALUES(?,?,?,?) ON CONFLICT(from_id,to_id) DO UPDATE SET kind=excluded.kind, created=excluded.created", (uid, to, kind, time.time()))
+        super_left = max(0, SUPER_DAILY - c.execute("SELECT COUNT(*) n FROM swipes WHERE from_id=? AND kind='super' AND created>?", (uid, time.time() - 86400)).fetchone()["n"])
         if kind == "pass":
-            return {"matched": False}
+            return {"matched": False, "super_left": super_left}
         score = compat(me, other)["score"]
         mutual = False
         if other["is_bot"]:
@@ -717,13 +729,14 @@ class Handler(BaseHTTPRequestHandler):
             r = c.execute("SELECT kind FROM swipes WHERE from_id=? AND to_id=?", (to, uid)).fetchone()
             mutual = bool(r and r["kind"] in ("like", "super"))
         if not mutual:
-            return {"matched": False, "note": "Đã gửi lượt thích, chờ họ thích lại" if not other["is_bot"] else "Bạn ấy chưa thấy hợp lắm, thử người khác nhé"}
+            note = ("Đã gửi Siêu thích ⭐ — hồ sơ bạn sẽ được đẩy lên đầu!" if kind == "super" else "Đã gửi lượt thích, chờ họ thích lại") if not other["is_bot"] else "Bạn ấy chưa thấy hợp lắm, thử người khác nhé"
+            return {"matched": False, "note": note, "super_left": super_left}
         m, created = create_match(c, uid, to, score)
         if created and other["is_bot"]:
             bot_say(c, m["id"], other["id"], bot_opening(other, score), 2.0)
         mp = match_public(c, m, uid)
         mp["rooms"] = rooms_for(c, me, other, uid)
-        return {"matched": True, "match": mp, "new": created}
+        return {"matched": True, "match": mp, "new": created, "super_left": super_left}
 
     def undo(self, c, me):
         row = c.execute("SELECT * FROM swipes WHERE from_id=? ORDER BY created DESC LIMIT 1", (me["id"],)).fetchone()

@@ -216,7 +216,7 @@ function cardHTML(u, pos) {
   const cp = u.compat;
   return `<div class="pcard ${pos ? 's' + pos : ''}" data-id="${u.id}">
     <div class="pc-hero c${u.color}" ${u.photo ? `style="background:url('${esc(u.photo)}') center/cover"` : ''}>
-      ${u.liked_you ? '<span class="chip coral pc-liked">💌 Đã thích bạn</span>' : ''}
+      ${u.liked_kind === 'super' ? '<span class="chip super-tag pc-liked">⭐ Đã siêu thích bạn</span>' : (u.liked_you ? '<span class="chip coral pc-liked">💌 Đã thích bạn</span>' : '')}
       <div class="pc-ring">${ringSvg(cp.score)}<div><b style="color:${scoreColor(cp.score)}">${cp.score}%</b><small>${level(cp.score).toUpperCase()}</small></div></div>
       ${u.photo ? '' : `<div class="pc-emoji">${esc(u.emoji)}</div>`}
       <div class="stamp like">HỢP CẠ</div><div class="stamp nope">BỎ QUA</div><div class="stamp super">SIÊU THÍCH</div>
@@ -238,7 +238,8 @@ function drawDeck() {
     $('#acts').innerHTML = ''; return;
   }
   deck.innerHTML = S.deck.slice(0, 3).map((u, i) => cardHTML(u, i)).reverse().join('');
-  $('#acts').innerHTML = `<button class="a-undo" onclick="undoSwipe()" title="Hoàn tác">↺</button><button class="a-no" onclick="flyTop('pass')"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button><button class="a-super" onclick="flyTop('super')" title="Siêu thích">⭐</button><button class="a-like" onclick="flyTop('like')">💚</button>`;
+  const sl = S.user?.super_left ?? 3;
+  $('#acts').innerHTML = `<button class="a-undo" onclick="undoSwipe()" title="Hoàn tác">↺</button><button class="a-no" onclick="flyTop('pass')" title="Bỏ qua"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button><button class="a-like" onclick="flyTop('like')" title="Thích">💚</button><button class="a-super ${sl ? '' : 'dim'}" onclick="flyTop('super')" title="Siêu thích (còn ${sl}/ngày)">⭐<span class="scnt">${sl}</span></button>`;
   bindDrag(deck.lastElementChild);
 }
 function topCard() { const d = $('#deck'); return d && d.querySelector('.pcard:last-child'); }
@@ -264,7 +265,12 @@ function bindDrag(el) {
 }
 function flyTop(kind) { if (S.busy || !topCard()) return; fly(kind, 0, 0); }
 function fly(kind, dx, dy) {
-  if (S.busy) return; S.busy = true; const el = topCard();
+  if (S.busy) return;
+  if (kind === 'super' && (S.user?.super_left ?? 3) <= 0) {
+    const el = topCard(); if (el) { el.style.transition = 'transform .3s cubic-bezier(.2,1.4,.4,1)'; el.style.transform = ''; el.querySelectorAll('.stamp').forEach(s => s.style.opacity = 0); }
+    return toast('Hôm nay bạn đã dùng hết 3 lượt Siêu thích ⭐');
+  }
+  S.busy = true; const el = topCard();
   const tx = kind === 'like' ? 520 : kind === 'pass' ? -520 : dx * 2, ty = kind === 'super' ? -700 : dy + 60;
   el.style.transition = 'transform .38s cubic-bezier(.4,0,.8,.6),opacity .38s'; el.style.opacity = 0.2;
   el.style.transform = `translate(${tx}px,${ty}px) rotate(${kind === 'like' ? 24 : kind === 'pass' ? -24 : 0}deg)`;
@@ -275,6 +281,7 @@ async function commitSwipe(kind) {
   const u = S.deck.shift(); S.last = u;
   try {
     const d = await api('swipe', 'POST', { to: u.id, kind });
+    if (d.super_left !== undefined && S.user) S.user.super_left = d.super_left;
     if (d.matched) { S.last = null; refreshUnread(); showMatch(d.match); }
     else if (kind !== 'pass') toast(d.note || 'Đã gửi lượt thích 💚');
   } catch (e) { toast(e.message); }

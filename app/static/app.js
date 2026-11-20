@@ -30,7 +30,21 @@ async function api(path, method = 'GET', body) {
   return d;
 }
 function toast(t) { const e = $('#toast'); e.textContent = t; e.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => e.classList.remove('show'), 2600); }
-const av = (u, s = 56) => `<div class="av c${u.color || 0}" style="--s:${s}px">${esc(u.emoji)}</div>`;
+const av = (u, s = 56) => `<div class="av c${u.color || 0}" style="--s:${s}px">${u.photo ? `<img src="${esc(u.photo)}" alt="">` : esc(u.emoji)}</div>`;
+const avBig = (u, s) => `<div class="av" style="background:rgba(255,255,255,.28);--s:${s}px;margin:auto">${u.photo ? `<img src="${esc(u.photo)}" alt="">` : esc(u.emoji)}</div>`;
+function pickPhoto(file) {
+  return new Promise((res, rej) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const S_ = 480, cv = document.createElement('canvas'); cv.width = cv.height = S_;
+      const m = Math.min(img.width, img.height), sx = (img.width - m) / 2, sy = (img.height - m) / 2;
+      cv.getContext('2d').drawImage(img, sx, sy, m, m, 0, 0, S_, S_); URL.revokeObjectURL(url);
+      res(cv.toDataURL('image/jpeg', 0.82));
+    };
+    img.onerror = () => rej(new Error('Không đọc được ảnh này'));
+    img.src = url;
+  });
+}
 const verdict = n => n >= 100 ? 'Giống' : n >= 75 ? 'Gần giống' : n >= 50 ? 'Hơi lệch' : 'Khác';
 const level = n => n >= 80 ? 'Rất hợp' : n >= 65 ? 'Khá hợp' : n >= 50 ? 'Tạm ổn' : 'Ít hợp';
 const SHORT = { sleep: 'Giờ ngủ', tidy: 'Sạch sẽ', money: 'Chi tiêu', noise: 'Độ ồn', guest: 'Khách' };
@@ -105,8 +119,15 @@ function onboarding(first, step = 0) {
   const prog = `<div class="prog">${[0, 1, 2].map(i => `<i class="${i <= step ? 'on' : ''}"></i>`).join('')}</div>`;
   let body = '', next = 'Tiếp tục';
   if (step === 0) {
+    $('#pu_file').onchange = async e => {
+      const f = e.target.files[0]; if (!f) return; scrape();
+      try { const d = await api('photo', 'POST', { data: await pickPhoto(f) }); S.user.photo = d.user.photo; toast('Đã cập nhật ảnh đại diện 📷'); onboarding(first, 0); } catch (er) { toast(er.message); }
+    };
+    if ($('#pu_del')) $('#pu_del').onclick = async () => { scrape(); const d = await api('photo', 'POST', { data: '' }); S.user.photo = d.user.photo; onboarding(first, 0); };
     body = `<h2 class="t">${first ? 'Chào mừng bạn! 👋' : 'Sửa hồ sơ'}</h2><p class="mu">Giới thiệu nhanh để mọi người biết bạn là ai.</p>
-    <div class="field"><label>Chọn avatar</label><div class="emojis">${EMOJIS.map(e => `<button class="${o.emoji === e ? 'sel' : ''}" data-e="${e}">${e}</button>`).join('')}</div></div>
+    <div class="photo-up"><div id="pu_av">${av({ emoji: o.emoji, color: o.color, photo: S.user.photo }, 92)}</div><div style="flex:1"><b>Ảnh đại diện</b><p class="mu" style="margin:2px 0 8px">Dùng ảnh thật của bạn để được tin tưởng hơn. Ảnh có mặt người sẽ nhận nhiều lượt thích hơn.</p>
+    <label class="btn sm coral" style="display:inline-block;cursor:pointer">📷 ${S.user.photo ? 'Đổi ảnh' : 'Tải ảnh lên'}<input type="file" id="pu_file" accept="image/*" hidden></label>${S.user.photo ? ' <button class="btn sm ghost" id="pu_del">Xóa ảnh</button>' : ''}</div></div>
+    <div class="field"><label>Hoặc chọn biểu tượng</label><div class="emojis">${EMOJIS.map(e => `<button class="${o.emoji === e ? 'sel' : ''}" data-e="${e}">${e}</button>`).join('')}</div></div>
     <div class="field"><label>Màu nền</label><div class="colors">${[0, 1, 2, 3, 4, 5, 6, 7].map(i => `<button class="c${i} ${o.color === i ? 'sel' : ''}" data-c="${i}"></button>`).join('')}</div></div>
     <div class="field"><label>Tên hiển thị</label><input class="input" id="o_name" value="${esc(o.name)}" maxlength="40" placeholder="Tên của bạn"></div>
     <div class="row field"><div class="grow"><label>Tuổi</label><input class="input" id="o_age" type="number" min="16" max="40" value="${o.age}"></div>
@@ -130,9 +151,19 @@ function onboarding(first, step = 0) {
   $('#screen').innerHTML = `${prog}<div class="view" style="padding-top:8px">${body}<div class="err" id="o_err"></div></div>
   <div class="foot">${step > 0 ? '<button class="btn ghost" id="o_back" style="width:90px">←</button>' : (!first ? '<button class="btn ghost" id="o_cancel" style="width:100px">Hủy</button>' : '')}<button class="btn coral" id="o_next">${next}</button></div>`;
   const scrape = () => {
-    if (step === 0) { o.name = $('#o_name').value.trim(); o.age = +$('#o_age').value || 20; o.gender = $('#o_gender').value; o.university = $('#o_uni').value; o.area = $('#o_area').value.trim(); o.bio = $('#o_bio').value.trim(); }
+    if (step === 0) {
+    $('#pu_file').onchange = async e => {
+      const f = e.target.files[0]; if (!f) return; scrape();
+      try { const d = await api('photo', 'POST', { data: await pickPhoto(f) }); S.user.photo = d.user.photo; toast('Đã cập nhật ảnh đại diện 📷'); onboarding(first, 0); } catch (er) { toast(er.message); }
+    };
+    if ($('#pu_del')) $('#pu_del').onclick = async () => { scrape(); const d = await api('photo', 'POST', { data: '' }); S.user.photo = d.user.photo; onboarding(first, 0); }; o.name = $('#o_name').value.trim(); o.age = +$('#o_age').value || 20; o.gender = $('#o_gender').value; o.university = $('#o_uni').value; o.area = $('#o_area').value.trim(); o.bio = $('#o_bio').value.trim(); }
   };
   if (step === 0) {
+    $('#pu_file').onchange = async e => {
+      const f = e.target.files[0]; if (!f) return; scrape();
+      try { const d = await api('photo', 'POST', { data: await pickPhoto(f) }); S.user.photo = d.user.photo; toast('Đã cập nhật ảnh đại diện 📷'); onboarding(first, 0); } catch (er) { toast(er.message); }
+    };
+    if ($('#pu_del')) $('#pu_del').onclick = async () => { scrape(); const d = await api('photo', 'POST', { data: '' }); S.user.photo = d.user.photo; onboarding(first, 0); };
     document.querySelectorAll('[data-e]').forEach(b => b.onclick = () => { scrape(); o.emoji = b.dataset.e; onboarding(first, 0); });
     document.querySelectorAll('[data-c]').forEach(b => b.onclick = () => { scrape(); o.color = +b.dataset.c; onboarding(first, 0); });
     document.querySelectorAll('#o_pref button').forEach(b => b.onclick = () => { scrape(); o.pref_gender = b.dataset.p; onboarding(first, 0); });
@@ -193,10 +224,10 @@ function ringSvg(n) {
 function cardHTML(u, pos) {
   const cp = u.compat;
   return `<div class="pcard ${pos ? 's' + pos : ''}" data-id="${u.id}">
-    <div class="pc-hero c${u.color}">
+    <div class="pc-hero c${u.color}" ${u.photo ? `style="background:url('${esc(u.photo)}') center/cover"` : ''}>
       ${u.liked_you ? '<span class="chip coral pc-liked">💌 Đã thích bạn</span>' : ''}
       <div class="pc-ring">${ringSvg(cp.score)}<div><b style="color:${scoreColor(cp.score)}">${cp.score}%</b><small>${level(cp.score).toUpperCase()}</small></div></div>
-      <div class="pc-emoji">${esc(u.emoji)}</div>
+      ${u.photo ? '' : `<div class="pc-emoji">${esc(u.emoji)}</div>`}
       <div class="stamp like">HỢP CẠ</div><div class="stamp nope">BỎ QUA</div><div class="stamp super">SIÊU THÍCH</div>
     </div>
     <div class="pc-body">
@@ -275,7 +306,7 @@ function openFilters() {
 }
 function openDetail(u) {
   if (!u) return; const cp = u.compat;
-  openSheet(`<div class="dhero c${u.color}">${av({ emoji: u.emoji, color: 9 }, 64).replace('c9', 'cx').replace('class="av cx"', 'class="av" style="background:rgba(255,255,255,.25);--s:64px"')}<div><div style="font-family:var(--display);font-size:24px;font-weight:800">${esc(u.name)}, ${u.age}</div><div style="font-size:13px;opacity:.9">🎓 ${esc(u.university)}<br>📍 ${esc(u.area || 'Chưa rõ')} · 💰 Tối đa ${u.budget_max} tr</div></div></div>
+  openSheet(`<div class="dhero c${u.color}">${avBig(u, 64).replace('margin:auto', 'margin:0')}<div><div style="font-family:var(--display);font-size:24px;font-weight:800">${esc(u.name)}, ${u.age}</div><div style="font-size:13px;opacity:.9">🎓 ${esc(u.university)}<br>📍 ${esc(u.area || 'Chưa rõ')} · 💰 Tối đa ${u.budget_max} tr</div></div></div>
   <div class="row"><div class="grow"><span class="mu">Mức hợp nhau · ${level(cp.score)}</span><div style="font-family:var(--display);font-size:38px;font-weight:800;color:${scoreColor(cp.score)}">${cp.score}%</div></div><div class="grow" style="text-align:right"><span class="mu">Ngân sách thuê</span><div style="font-family:var(--display);font-size:20px;font-weight:800">${cp.budget >= 60 ? 'Khớp nhau' : cp.budget >= 25 ? 'Hơi lệch' : 'Lệch nhiều'}</div></div></div>
   <p style="font-size:14px;line-height:1.5;margin:10px 0">${esc(u.bio)}</p><div>${u.tags.map(t => `<span class="chip${cp.shared_tags.includes(t) ? ' ok' : ''}">${esc(t)}</span>`).join('')}</div>
   <h3 class="t">So sánh thói quen</h3><div class="legend"><span><i style="background:var(--moss)"></i>Bạn</span><span><i style="background:var(--coral)"></i>${esc(u.name.split(' ').pop())}</span></div>
@@ -417,7 +448,7 @@ async function renderMe() {
   try { S.user = (await api('me')).user; } catch (e) { }
   const u = S.user;
   $('#main').innerHTML = `<div class="view" style="padding-top:14px">
-  <div class="phero c${u.color}">${av({ emoji: u.emoji, color: 9 }, 84).replace('class="av c9"', 'class="av" style="background:rgba(255,255,255,.28);margin:auto;--s:84px"')}<h2>${esc(u.name)}, ${u.age}</h2><div style="font-size:13px;opacity:.9">🎓 ${esc(u.university || 'Chưa chọn trường')} · 📍 ${esc(u.area || '—')}</div>
+  <div class="phero c${u.color}">${avBig(u, 96)}<h2>${esc(u.name)}, ${u.age}</h2><div style="font-size:13px;opacity:.9">🎓 ${esc(u.university || 'Chưa chọn trường')} · 📍 ${esc(u.area || '—')}</div>
   ${u.guest ? '<div style="margin-top:8px;font-size:12px;background:rgba(0,0,0,.2);border-radius:10px;padding:6px 10px;display:inline-block">Tài khoản dùng thử</div>' : ''}</div>
   <div class="statrow"><div class="stat"><b>${u.counts.swiped}</b><span>Đã quẹt</span></div><div class="stat"><b>${u.counts.matches}</b><span>Match</span></div><div class="stat"><b>${u.liked_me}</b><span>Thích bạn</span></div></div>
   <div class="card"><b>Chân dung sinh hoạt</b>${radar(u.habits)}<div style="margin-top:6px">${u.tags.map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div><p class="mu" style="margin-top:6px">💰 Tiền thuê tối đa ${u.budget_max} triệu/người/tháng · ${HNAME[u.house_type]} · ưu tiên ${PNAME[u.priority].toLowerCase()}</p></div>

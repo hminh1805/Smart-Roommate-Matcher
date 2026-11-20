@@ -123,6 +123,9 @@ def init_db():
     if "house_type" not in cols:
         c.execute("ALTER TABLE users ADD COLUMN house_type TEXT DEFAULT 'tro'")
         c.execute("ALTER TABLE users ADD COLUMN priority TEXT DEFAULT 'cheap'")
+    if "photo_v" not in cols:
+        c.execute("ALTER TABLE users ADD COLUMN photo_v INTEGER DEFAULT 0")
+    c.execute("CREATE TABLE IF NOT EXISTS photos(user_id INTEGER PRIMARY KEY, data BLOB)")
     fresh = not c.execute("SELECT 1 FROM users WHERE is_bot=1").fetchone()
     if fresh:
         for i, b in enumerate(BOTS):
@@ -161,6 +164,7 @@ def user_row_to_dict(u, me=None, full=True):
         "house_type": u["house_type"], "priority": u["priority"],
         "habits": {k: u[k] for k in HABITS}, "tags": json.loads(u["tags"] or "[]"),
         "is_bot": bool(u["is_bot"]),
+        "photo": f"/photo/{u['id']}?v={u['photo_v']}" if u["photo_v"] else "",
     }
     if me is not None:
         d["compat"] = compat(me, u)
@@ -393,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def body(self):
         n = int(self.headers.get("Content-Length") or 0)
-        if n > 100_000:
+        if n > 700_000:
             raise Err(413, "Dữ liệu quá lớn")
         if not n:
             return {}
@@ -430,6 +434,8 @@ class Handler(BaseHTTPRequestHandler):
                     c.commit()
                 finally:
                     c.close()
+            elif method == "GET" and path.startswith("/photo/"):
+                self.photo(path[7:])
             elif method == "GET":
                 self.static(path)
             else:
@@ -442,6 +448,22 @@ class Handler(BaseHTTPRequestHandler):
             import traceback
             traceback.print_exc()
             self.send_json({"error": "Lỗi máy chủ: " + str(e)}, 500)
+
+    def photo(self, pid):
+        c = db()
+        try:
+            row = c.execute("SELECT data FROM photos WHERE user_id=?", (int(pid) if pid.isdigit() else 0,)).fetchone()
+        finally:
+            c.close()
+        if not row:
+            raise Err(404, "Không có ảnh")
+        data = bytes(row["data"])
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.end_headers()
+        self.wfile.write(data)
 
     def static(self, path):
         if path in ("", "/"):
@@ -479,6 +501,25 @@ class Handler(BaseHTTPRequestHandler):
                 apply_profile(c, uid, self.body())
                 me = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
                 return {"user": self.me_dict(c, me)}
+        if path == "photo" and method == "POST":
+            import base64
+            d = str(self.body().get("data") or "")
+            if d:
+                m = re.fullmatch(r"data:image/(?:jpeg|jpg|png|webp);base64,([A-Za-z0-9+/=]+)", d)
+                if not m:
+                    raise Err(400, "Ảnh không hợp lệ")
+                raw = base64.b64decode(m.group(1))
+                if len(raw) > 400_000:
+                    raise Err(413, "Ảnh quá lớn")
+                if not (raw[:3] == b"\xff\xd8\xff" or raw[:4] == b"\x89PNG" or raw[:4] == b"RIFF"):
+                    raise Err(400, "Định dạng ảnh không hỗ trợ")
+                c.execute("INSERT OR REPLACE INTO photos VALUES(?,?)", (uid, raw))
+                c.execute("UPDATE users SET photo_v=? WHERE id=?", (int(time.time()), uid))
+            else:
+                c.execute("DELETE FROM photos WHERE user_id=?", (uid,))
+                c.execute("UPDATE users SET photo_v=0 WHERE id=?", (uid,))
+            me = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            return {"user": self.me_dict(c, me)}
         if path == "logout" and method == "POST":
             tok = self.headers.get("Authorization", "")[7:]
             c.execute("DELETE FROM sessions WHERE token=?", (tok,))

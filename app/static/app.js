@@ -1,4 +1,4 @@
-/* Chung Nhà – Smart Roommate Matcher (frontend, vanilla JS) */
+﻿/* Chung Nhà – Smart Roommate Matcher (frontend, vanilla JS) */
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = n => Number(n).toLocaleString('vi-VN') + 'đ';
@@ -13,6 +13,9 @@ const EMOJIS = ['😎', '🙂', '😄', '🤓', '🥳', '😺', '🦊', '🐼', 
 const TAGS = ['🎮 Game', '📚 Chăm học', '🍳 Nấu ăn', '🏋️ Gym', '🎧 Nhạc', '🐱 Thú cưng', '🚭 Không hút thuốc', '🎬 Phim', '☕ Cà phê', '🌱 Sống xanh'];
 const UNIS = ['ĐH Bách Khoa', 'ĐH Khoa học Tự nhiên', 'ĐH Kinh tế TP.HCM', 'ĐH Văn Lang', 'ĐH Ngoại thương', 'ĐH Công nghiệp', 'ĐH Sư phạm TP.HCM', 'ĐH Tôn Đức Thắng', 'ĐH FPT', 'ĐH Y Dược TP.HCM', 'ĐH Kiến trúc TP.HCM', 'Trường khác'];
 const ICEBREAK = ['Bạn thường ngủ lúc mấy giờ? 🌙', 'Bạn chia tiền điện nước thế nào? 💸', 'Bạn có hay nấu ăn không? 🍳', 'Cuối tuần đi xem phòng nhé? 🏠', 'Bạn hay đưa bạn bè về phòng không? 👥'];
+const HOUSES = [['tro', '🏠', 'Phòng trọ', 'Rẻ, đơn giản'], ['mini', '🏢', 'Chung cư mini', 'Tầm trung, đủ đồ'], ['chungcu', '🌆', 'Căn hộ', 'Sạch đẹp, cao cấp']];
+const PRIOS = [['cheap', '💸', 'Giá rẻ', 'Tiết kiệm nhất'], ['near', '📍', 'Gần trường', 'Đi bộ được'], ['quality', '✨', 'Sạch đẹp', 'Tiện nghi tốt']];
+const HNAME = Object.fromEntries(HOUSES.map(h => [h[0], h[2]])), PNAME = Object.fromEntries(PRIOS.map(p => [p[0], p[2]]));
 const SVC = [['room', '🏘️', 'Phòng trọ'], ['truck', '🚚', 'Xe chuyển'], ['clean', '🧽', 'Dọn dẹp'], ['used', '🛋️', 'Đồ cũ']];
 
 const S = { token: localStorage.getItem('rm_token'), user: null, tab: 'disc', deck: [], unis: [], filters: { min: 0, uni: '' }, last: null, busy: false, matches: [], unread: 0, svc: 'room', onb: null, loaded: false };
@@ -96,7 +99,7 @@ function authScreen(mode) {
 /* ---------- onboarding ---------- */
 function onboarding(first, step = 0) {
   const u = S.user;
-  if (!S.onb) S.onb = { name: u.name === 'Bạn mới' ? '' : u.name, emoji: u.emoji || '😎', color: u.color || 0, age: u.age || 20, gender: u.gender || 'khac', pref_gender: u.pref_gender || 'any', university: u.university || '', area: u.area || '', bio: u.bio || '', budget_min: u.budget_min || 2, budget_max: u.budget_max || 4, tags: [...(u.tags || [])], ...u.habits };
+  if (!S.onb) S.onb = { name: u.name === 'Bạn mới' ? '' : u.name, emoji: u.emoji || '😎', color: u.color || 0, age: u.age || 20, gender: u.gender || 'khac', pref_gender: u.pref_gender || 'any', university: u.university || '', area: u.area || '', bio: u.bio || '', budget_min: u.budget_min || 2, budget_max: u.budget_max || 4, tags: [...(u.tags || [])], house_type: u.house_type || 'tro', priority: u.priority || 'cheap', ...u.habits };
   S.onb._first = first;
   const o = S.onb;
   const prog = `<div class="prog">${[0, 1, 2].map(i => `<i class="${i <= step ? 'on' : ''}"></i>`).join('')}</div>`;
@@ -116,9 +119,11 @@ function onboarding(first, step = 0) {
     body = `<h2 class="t">Thói quen sinh hoạt</h2><p class="mu">Kéo thanh trượt đúng với con người bạn. Đây là thứ quyết định độ hợp nhau.</p>
     ${HAB.map(h => `<div class="habit"><div class="hd"><div>${h.ic} ${h.l}</div><span id="hv_${h.k}">${o[h.k]}/5</span></div><input type="range" min="1" max="5" value="${o[h.k]}" data-h="${h.k}"><div class="ends"><span>${h.a}</span><span>${h.b}</span></div></div>`).join('')}`;
   } else {
-    body = `<h2 class="t">Ngân sách & sở thích</h2><p class="mu">Giúp gợi ý phòng đúng túi tiền và tìm điểm chung.</p>
-    <div class="habit"><div class="hd"><div>💰 Ngân sách mỗi người / tháng</div><span id="bv">${o.budget_min} – ${o.budget_max} tr</span></div>
-    <input type="range" min="1" max="10" step="0.5" value="${o.budget_min}" id="bmin"><input type="range" min="1" max="10" step="0.5" value="${o.budget_max}" id="bmax"><div class="ends"><span>1 triệu</span><span>10 triệu</span></div></div>
+    body = `<h2 class="t">Bạn muốn thuê kiểu gì?</h2><p class="mu">Hai người muốn khác nhau (một người thích chung cư sạch, một người cần trọ rẻ) rất dễ bất đồng, nên mình hỏi trước.</p>
+    <div class="field"><label>Loại nhà muốn thuê</label><div class="opts" id="o_house">${HOUSES.map(([k, ic, l, d]) => `<button class="opt ${o.house_type === k ? 'sel' : ''}" data-ht="${k}"><span>${ic}</span><b>${l}</b><small>${d}</small></button>`).join('')}</div></div>
+    <div class="field"><label>Điều bạn ưu tiên nhất</label><div class="opts" id="o_prio">${PRIOS.map(([k, ic, l, d]) => `<button class="opt ${o.priority === k ? 'sel' : ''}" data-pr="${k}"><span>${ic}</span><b>${l}</b><small>${d}</small></button>`).join('')}</div></div>
+    <div class="habit"><div class="hd"><div>💰 Tiền thuê tối đa mỗi người / tháng</div><span id="bv">${o.budget_max} triệu</span></div>
+    <input type="range" min="1" max="10" step="0.5" value="${o.budget_max}" id="bmax"><div class="ends"><span>1 triệu</span><span>10 triệu</span></div></div>
     <div class="field"><label>Sở thích & lối sống</label><div id="o_tags">${TAGS.map(t => `<button class="chip ${o.tags.includes(t) ? 'sel' : ''}" data-t="${t}" style="border:0;font-size:13px;padding:8px 12px">${t}</button>`).join('')}</div></div>`;
     next = first ? 'Bắt đầu tìm bạn cùng phòng 🚀' : 'Lưu thay đổi';
   }
@@ -134,8 +139,10 @@ function onboarding(first, step = 0) {
   }
   if (step === 1) document.querySelectorAll('[data-h]').forEach(r => r.oninput = () => { o[r.dataset.h] = +r.value; $('#hv_' + r.dataset.h).textContent = r.value + '/5'; });
   if (step === 2) {
-    const upd = () => { let a = +$('#bmin').value, b = +$('#bmax').value; if (a > b) { [a, b] = [b, a]; } o.budget_min = a; o.budget_max = b; $('#bv').textContent = `${a} – ${b} tr`; };
-    $('#bmin').oninput = upd; $('#bmax').oninput = upd; upd();
+    const upd = () => { const b = +$('#bmax').value; o.budget_max = b; o.budget_min = Math.max(1, b - 1.5); $('#bv').textContent = `${b} triệu`; };
+    $('#bmax').oninput = upd; upd();
+    document.querySelectorAll('[data-ht]').forEach(b => b.onclick = () => { o.house_type = b.dataset.ht; document.querySelectorAll('[data-ht]').forEach(x => x.classList.toggle('sel', x === b)); });
+    document.querySelectorAll('[data-pr]').forEach(b => b.onclick = () => { o.priority = b.dataset.pr; document.querySelectorAll('[data-pr]').forEach(x => x.classList.toggle('sel', x === b)); });
     document.querySelectorAll('[data-t]').forEach(b => b.onclick = () => { const t = b.dataset.t; o.tags = o.tags.includes(t) ? o.tags.filter(x => x !== t) : [...o.tags, t]; b.classList.toggle('sel'); });
   }
   if ($('#o_back')) $('#o_back').onclick = () => { scrape(); onboarding(first, step - 1); };
@@ -195,7 +202,8 @@ function cardHTML(u, pos) {
     <div class="pc-body">
       <h3>${esc(u.name)} <span>${u.age}</span></h3>
       <div class="pc-meta">🎓 ${esc(u.university || 'Chưa cập nhật')}${u.area ? ' · 📍 ' + esc(u.area) : ''}</div>
-      <div>${u.tags.slice(0, 3).map(t => `<span class="chip${cp.shared_tags.includes(t) ? ' ok' : ''}">${esc(t)}</span>`).join('')}</div>
+      <div>${[`💰 Tối đa ${u.budget_max} tr`, (HOUSES.find(h => h[0] === u.house_type) || [])[1] + ' ' + HNAME[u.house_type], '⭐ ' + PNAME[u.priority]].map(t => `<span class="chip" style="background:var(--moss);color:#fff">${esc(t)}</span>`).join('')}</div>
+      <div>${u.tags.slice(0, 2).map(t => `<span class="chip${cp.shared_tags.includes(t) ? ' ok' : ''}">${esc(t)}</span>`).join('')}</div>
       <div class="pc-bio">${esc(u.bio)}</div>
       <div class="minis">${cp.habits.map(h => `<div class="mini">${HAB.find(x => x.k === h.key).ic}<small style="color:var(--mu)">${SHORT[h.key]}</small><small style="color:${scoreColor(h.sim)}">${verdict(h.sim)}</small><i style="width:${h.sim}%;background:${scoreColor(h.sim)}"></i></div>`).join('')}</div>
     </div></div>`;
@@ -267,11 +275,12 @@ function openFilters() {
 }
 function openDetail(u) {
   if (!u) return; const cp = u.compat;
-  openSheet(`<div class="dhero c${u.color}">${av({ emoji: u.emoji, color: 9 }, 64).replace('c9', 'cx').replace('class="av cx"', 'class="av" style="background:rgba(255,255,255,.25);--s:64px"')}<div><div style="font-family:var(--display);font-size:24px;font-weight:800">${esc(u.name)}, ${u.age}</div><div style="font-size:13px;opacity:.9">🎓 ${esc(u.university)}<br>📍 ${esc(u.area || 'Chưa rõ')} · 💰 ${u.budget_min}–${u.budget_max} tr</div></div></div>
+  openSheet(`<div class="dhero c${u.color}">${av({ emoji: u.emoji, color: 9 }, 64).replace('c9', 'cx').replace('class="av cx"', 'class="av" style="background:rgba(255,255,255,.25);--s:64px"')}<div><div style="font-family:var(--display);font-size:24px;font-weight:800">${esc(u.name)}, ${u.age}</div><div style="font-size:13px;opacity:.9">🎓 ${esc(u.university)}<br>📍 ${esc(u.area || 'Chưa rõ')} · 💰 Tối đa ${u.budget_max} tr</div></div></div>
   <div class="row"><div class="grow"><span class="mu">Mức hợp nhau · ${level(cp.score)}</span><div style="font-family:var(--display);font-size:38px;font-weight:800;color:${scoreColor(cp.score)}">${cp.score}%</div></div><div class="grow" style="text-align:right"><span class="mu">Ngân sách thuê</span><div style="font-family:var(--display);font-size:20px;font-weight:800">${cp.budget >= 60 ? 'Khớp nhau' : cp.budget >= 25 ? 'Hơi lệch' : 'Lệch nhiều'}</div></div></div>
   <p style="font-size:14px;line-height:1.5;margin:10px 0">${esc(u.bio)}</p><div>${u.tags.map(t => `<span class="chip${cp.shared_tags.includes(t) ? ' ok' : ''}">${esc(t)}</span>`).join('')}</div>
   <h3 class="t">So sánh thói quen</h3><div class="legend"><span><i style="background:var(--moss)"></i>Bạn</span><span><i style="background:var(--coral)"></i>${esc(u.name.split(' ').pop())}</span></div>
   ${cp.habits.map(h => { const m = HAB.find(x => x.k === h.key); return `<div class="cmp"><div class="l"><span>${m.ic} ${m.l}</span><span style="color:${scoreColor(h.sim)}">${verdict(h.sim)}</span></div><div class="tr"><div class="dt me" style="left:${(h.me - 1) * 25}%"></div><div class="dt th" style="left:${(h.them - 1) * 25}%"></div></div><div class="ends" style="display:flex;justify-content:space-between;font-size:10px;color:var(--mu);margin-top:6px"><span>${m.a}</span><span>${m.b}</span></div></div>`; }).join('')}
+  <h3 class="t">🏘️ Nhu cầu thuê nhà</h3><div class="card" style="padding:0 14px">${[['💰 Tiền thuê tối đa', S.user.budget_max + ' triệu', u.budget_max + ' triệu', Math.abs(S.user.budget_max - u.budget_max) <= 0.5 ? 100 : Math.abs(S.user.budget_max - u.budget_max) <= 1.5 ? 75 : 25], ['🏠 Loại nhà', HNAME[S.user.house_type], HNAME[u.house_type], S.user.house_type === u.house_type ? 100 : 50], ['⭐ Ưu tiên', PNAME[S.user.priority], PNAME[u.priority], S.user.priority === u.priority ? 100 : 50]].map(([l, a, b, s]) => `<div class="ordr" style="align-items:center"><div><b>${l}</b><div class="mu">Bạn: ${esc(a)} · ${esc(u.name.split(' ').pop())}: ${esc(b)}</div></div><b style="color:${scoreColor(s)};white-space:nowrap">${s === 100 ? 'Giống' : s >= 75 ? 'Gần giống' : s >= 50 ? 'Hơi lệch' : 'Lệch'}</b></div>`).join('')}</div>
   <h3 class="t">💡 Gợi ý từ hệ thống</h3>${cp.insights.map(i => `<div class="insight"><span>•</span><span>${esc(i)}</span></div>`).join('') || '<p class="mu">Hai bạn khá trung tính, hãy trò chuyện thêm nhé.</p>'}
   <div class="row" style="margin-top:18px"><button class="btn ghost" onclick="closeSheet();flyTop('pass')">✕ Bỏ qua</button><button class="btn coral" onclick="closeSheet();flyTop('like')">💚 Thích</button></div>`);
 }
@@ -411,7 +420,7 @@ async function renderMe() {
   <div class="phero c${u.color}">${av({ emoji: u.emoji, color: 9 }, 84).replace('class="av c9"', 'class="av" style="background:rgba(255,255,255,.28);margin:auto;--s:84px"')}<h2>${esc(u.name)}, ${u.age}</h2><div style="font-size:13px;opacity:.9">🎓 ${esc(u.university || 'Chưa chọn trường')} · 📍 ${esc(u.area || '—')}</div>
   ${u.guest ? '<div style="margin-top:8px;font-size:12px;background:rgba(0,0,0,.2);border-radius:10px;padding:6px 10px;display:inline-block">Tài khoản dùng thử</div>' : ''}</div>
   <div class="statrow"><div class="stat"><b>${u.counts.swiped}</b><span>Đã quẹt</span></div><div class="stat"><b>${u.counts.matches}</b><span>Match</span></div><div class="stat"><b>${u.liked_me}</b><span>Thích bạn</span></div></div>
-  <div class="card"><b>Chân dung sinh hoạt</b>${radar(u.habits)}<div style="margin-top:6px">${u.tags.map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div><p class="mu" style="margin-top:6px">💰 Ngân sách ${u.budget_min}–${u.budget_max} triệu/người/tháng</p></div>
+  <div class="card"><b>Chân dung sinh hoạt</b>${radar(u.habits)}<div style="margin-top:6px">${u.tags.map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div><p class="mu" style="margin-top:6px">💰 Tiền thuê tối đa ${u.budget_max} triệu/người/tháng · ${HNAME[u.house_type]} · ưu tiên ${PNAME[u.priority].toLowerCase()}</p></div>
   <button class="btn" onclick="S.onb=null;onboarding(false,0)">✏️ Chỉnh sửa hồ sơ & thói quen</button>
   <button class="btn ghost" style="margin-top:10px" onclick="openOrders()">🧾 Đơn của tôi (${u.counts.orders})</button>
   <button class="btn ghost" style="margin-top:10px" onclick="openPartner()">📊 Bảng điều khiển đối tác (B2B)</button>
@@ -434,3 +443,4 @@ async function openPartner() {
   <h3 class="t">Doanh thu ước tính</h3><div class="card" style="text-align:center"><div class="price" style="font-size:28px">${fmt(s.sponsor_revenue + s.commission)}</div><div class="mu">Phí hiển thị + hoa hồng</div></div>`);
 }
 boot();
+

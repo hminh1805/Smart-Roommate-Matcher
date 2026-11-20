@@ -111,11 +111,20 @@ SERVICES = [
 ]
 
 
+HOUSE_TYPES = {"tro": "Phòng trọ", "mini": "Chung cư mini", "chungcu": "Căn hộ / chung cư"}
+PRIORITIES = {"cheap": "Giá rẻ", "near": "Gần trường", "quality": "Sạch đẹp, tiện nghi"}
+
+
 def init_db():
     c = db()
     c.executescript(SCHEMA)
     c.execute("PRAGMA journal_mode=WAL")
-    if not c.execute("SELECT 1 FROM users WHERE is_bot=1").fetchone():
+    cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
+    if "house_type" not in cols:
+        c.execute("ALTER TABLE users ADD COLUMN house_type TEXT DEFAULT 'tro'")
+        c.execute("ALTER TABLE users ADD COLUMN priority TEXT DEFAULT 'cheap'")
+    fresh = not c.execute("SELECT 1 FROM users WHERE is_bot=1").fetchone()
+    if fresh:
         for i, b in enumerate(BOTS):
             n, e, g, age, uni, area, bmin, bmax, h, tags, bio = b
             c.execute(
@@ -123,6 +132,12 @@ def init_db():
                 " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,?)",
                 (f"bot{i}", n, e, i % 8, uni, bio, age, g, bmin, bmax, area, *h, json.dumps(tags, ensure_ascii=False), time.time()),
             )
+    if fresh or "house_type" not in cols:
+        for r in c.execute("SELECT id,budget_max FROM users WHERE is_bot=1").fetchall():
+            bm = r["budget_max"]
+            ht = "tro" if bm < 3.6 else ("mini" if bm < 4.8 else "chungcu")
+            pr = "cheap" if bm < 3.3 else (["near", "quality", "near"][r["id"] % 3] if bm < 4.8 else "quality")
+            c.execute("UPDATE users SET house_type=?, priority=? WHERE id=?", (ht, pr, r["id"]))
     if not c.execute("SELECT 1 FROM rooms").fetchone():
         for r in ROOMS:
             c.execute("INSERT INTO rooms VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -143,6 +158,7 @@ def user_row_to_dict(u, me=None, full=True):
         "id": u["id"], "name": u["name"], "emoji": u["emoji"], "color": u["color"],
         "university": u["university"], "bio": u["bio"], "age": u["age"], "gender": u["gender"],
         "area": u["area"], "budget_min": u["budget_min"], "budget_max": u["budget_max"],
+        "house_type": u["house_type"], "priority": u["priority"],
         "habits": {k: u[k] for k in HABITS}, "tags": json.loads(u["tags"] or "[]"),
         "is_bot": bool(u["is_bot"]),
     }
@@ -155,13 +171,16 @@ def compat(a, b):
     tot = sum(WEIGHTS.values())
     dist = sum(WEIGHTS[k] * abs(a[k] - b[k]) / 4 for k in HABITS) / tot
     habit = 1 - dist
-    span = max(a["budget_max"], b["budget_max"]) - min(a["budget_min"], b["budget_min"])
-    overlap = max(0, min(a["budget_max"], b["budget_max"]) - max(a["budget_min"], b["budget_min"]))
-    budget = overlap / span if span > 0 else 1.0
+    budget = max(0.0, 1 - abs(a["budget_max"] - b["budget_max"]) / 3.0)  # lệch 3 triệu trở lên = 0
+    order = ["tro", "mini", "chungcu"]
+    gap = abs(order.index(a["house_type"]) - order.index(b["house_type"]))
+    house = (1.0, 0.5, 0.0)[gap]
+    prio = 1.0 if a["priority"] == b["priority"] else 0.4
+    housing = 0.65 * house + 0.35 * prio
     ta, tb = set(json.loads(a["tags"] or "[]")), set(json.loads(b["tags"] or "[]"))
     tagsim = len(ta & tb) / len(ta | tb) if (ta | tb) else 0.0
     same_uni = 1.0 if a["university"] and a["university"] == b["university"] else 0.0
-    raw = 0.72 * habit + 0.14 * budget + 0.09 * tagsim + 0.05 * same_uni
+    raw = 0.58 * habit + 0.14 * budget + 0.14 * housing + 0.09 * tagsim + 0.05 * same_uni
     score = max(20, min(99, round(35 + 65 * raw)))
     items = []
     for k in HABITS:
@@ -178,8 +197,16 @@ def compat(a, b):
     shared = sorted(ta & tb)
     if shared:
         insights.append("Điểm chung: " + ", ".join(shared))
-    if budget >= 0.6:
-        insights.append("Ngân sách thuê phòng khá khớp nhau")
+    if budget >= 0.7:
+        insights.append("Ngân sách tối đa gần bằng nhau")
+    elif budget < 0.4:
+        insights.append(f"Ngân sách chênh nhau: bạn tối đa {a['budget_max']:g} tr, bạn ấy {b['budget_max']:g} tr, cần bàn lại mức giá phòng")
+    if gap == 0:
+        insights.append(f"Cùng muốn thuê {HOUSE_TYPES[a['house_type']].lower()}")
+    elif gap == 2:
+        insights.append(f"Khác nhu cầu nhà: bạn muốn {HOUSE_TYPES[a['house_type']].lower()}, bạn ấy muốn {HOUSE_TYPES[b['house_type']].lower()}")
+    if a["priority"] != b["priority"]:
+        insights.append(f"Ưu tiên khác nhau: bạn chọn «{PRIORITIES[a['priority']].lower()}», bạn ấy chọn «{PRIORITIES[b['priority']].lower()}»")
     return {"score": score, "habits": items, "budget": round(budget * 100), "shared_tags": shared, "insights": insights}
 
 
@@ -271,7 +298,11 @@ def rooms_for(c, me, other, user_id, log=True):
         per = r["price"] / 2 / 1_000_000
         fits = per <= avg_max + 0.3
         near_hit = any(u in near for u in unis if u)
-        rank = (r["sponsored"] * 2) + (2 if near_hit else 0) + (1 if fits else -1)
+        rtype = "tro" if r["price"] < 3_800_000 else ("mini" if r["price"] < 5_800_000 else "chungcu")
+        want = {me["house_type"], other["house_type"] if other else me["house_type"]}
+        type_hit = rtype in want
+        prio = {me["priority"], other["priority"] if other else me["priority"]}
+        rank = (r["sponsored"] * 1) + (2 if near_hit and "near" in prio else 1 if near_hit else 0) + (2 if type_hit else 0) + (2 if fits else -2)
         out.append((rank, r, per, fits, near_hit))
     out.sort(key=lambda x: -x[0])
     res = []
@@ -334,6 +365,8 @@ def apply_profile(c, uid, p):
     g = p.get("gender", "khac")
     fields["gender"] = g if g in allowed_gender else "khac"
     fields["pref_gender"] = "same" if p.get("pref_gender") == "same" else "any"
+    fields["house_type"] = p.get("house_type") if p.get("house_type") in HOUSE_TYPES else "tro"
+    fields["priority"] = p.get("priority") if p.get("priority") in PRIORITIES else "cheap"
     tags = [clean_text(t, 30) for t in (p.get("tags") or [])][:8]
     fields["tags"] = json.dumps(tags, ensure_ascii=False)
     fields["onboarded"] = 1

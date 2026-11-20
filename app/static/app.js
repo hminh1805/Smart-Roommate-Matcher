@@ -28,6 +28,9 @@ async function api(path, method = 'GET', body) {
 }
 function toast(t) { const e = $('#toast'); e.textContent = t; e.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => e.classList.remove('show'), 2600); }
 const av = (u, s = 56) => `<div class="av c${u.color || 0}" style="--s:${s}px">${esc(u.emoji)}</div>`;
+const verdict = n => n >= 100 ? 'Giống' : n >= 75 ? 'Gần giống' : n >= 50 ? 'Hơi lệch' : 'Khác';
+const level = n => n >= 80 ? 'Rất hợp' : n >= 65 ? 'Khá hợp' : n >= 50 ? 'Tạm ổn' : 'Ít hợp';
+const SHORT = { sleep: 'Giờ ngủ', tidy: 'Sạch sẽ', money: 'Chi tiêu', noise: 'Độ ồn', guest: 'Khách' };
 const scoreColor = n => n >= 75 ? 'var(--ok)' : n >= 50 ? 'var(--warn)' : 'var(--bad)';
 function openSheet(html) { $('#sheet').innerHTML = '<div class="grab"></div>' + html; $('#sheet-wrap').classList.add('show'); $('#sheet').scrollTop = 0; }
 function closeSheet() { $('#sheet-wrap').classList.remove('show'); }
@@ -185,7 +188,7 @@ function cardHTML(u, pos) {
   return `<div class="pcard ${pos ? 's' + pos : ''}" data-id="${u.id}">
     <div class="pc-hero c${u.color}">
       ${u.liked_you ? '<span class="chip coral pc-liked">💌 Đã thích bạn</span>' : ''}
-      <div class="pc-ring">${ringSvg(cp.score)}<div><b style="color:${scoreColor(cp.score)}">${cp.score}%</b><small>HỢP</small></div></div>
+      <div class="pc-ring">${ringSvg(cp.score)}<div><b style="color:${scoreColor(cp.score)}">${cp.score}%</b><small>${level(cp.score).toUpperCase()}</small></div></div>
       <div class="pc-emoji">${esc(u.emoji)}</div>
       <div class="stamp like">HỢP CẠ</div><div class="stamp nope">BỎ QUA</div><div class="stamp super">SIÊU THÍCH</div>
     </div>
@@ -194,7 +197,7 @@ function cardHTML(u, pos) {
       <div class="pc-meta">🎓 ${esc(u.university || 'Chưa cập nhật')}${u.area ? ' · 📍 ' + esc(u.area) : ''}</div>
       <div>${u.tags.slice(0, 3).map(t => `<span class="chip${cp.shared_tags.includes(t) ? ' ok' : ''}">${esc(t)}</span>`).join('')}</div>
       <div class="pc-bio">${esc(u.bio)}</div>
-      <div class="minis">${cp.habits.map(h => `<div class="mini">${HAB.find(x => x.k === h.key).ic}<small style="color:${scoreColor(h.sim)}">${h.sim}%</small><i style="width:${h.sim}%;background:${scoreColor(h.sim)}"></i></div>`).join('')}</div>
+      <div class="minis">${cp.habits.map(h => `<div class="mini">${HAB.find(x => x.k === h.key).ic}<small style="color:var(--mu)">${SHORT[h.key]}</small><small style="color:${scoreColor(h.sim)}">${verdict(h.sim)}</small><i style="width:${h.sim}%;background:${scoreColor(h.sim)}"></i></div>`).join('')}</div>
     </div></div>`;
 }
 function drawDeck() {
@@ -265,10 +268,10 @@ function openFilters() {
 function openDetail(u) {
   if (!u) return; const cp = u.compat;
   openSheet(`<div class="dhero c${u.color}">${av({ emoji: u.emoji, color: 9 }, 64).replace('c9', 'cx').replace('class="av cx"', 'class="av" style="background:rgba(255,255,255,.25);--s:64px"')}<div><div style="font-family:var(--display);font-size:24px;font-weight:800">${esc(u.name)}, ${u.age}</div><div style="font-size:13px;opacity:.9">🎓 ${esc(u.university)}<br>📍 ${esc(u.area || 'Chưa rõ')} · 💰 ${u.budget_min}–${u.budget_max} tr</div></div></div>
-  <div class="row"><div class="grow"><span class="mu">Độ tương đồng</span><div style="font-family:var(--display);font-size:38px;font-weight:800;color:${scoreColor(cp.score)}">${cp.score}%</div></div><div class="grow" style="text-align:right"><span class="mu">Ngân sách khớp</span><div style="font-family:var(--display);font-size:24px;font-weight:800">${cp.budget}%</div></div></div>
+  <div class="row"><div class="grow"><span class="mu">Mức hợp nhau · ${level(cp.score)}</span><div style="font-family:var(--display);font-size:38px;font-weight:800;color:${scoreColor(cp.score)}">${cp.score}%</div></div><div class="grow" style="text-align:right"><span class="mu">Ngân sách thuê</span><div style="font-family:var(--display);font-size:20px;font-weight:800">${cp.budget >= 60 ? 'Khớp nhau' : cp.budget >= 25 ? 'Hơi lệch' : 'Lệch nhiều'}</div></div></div>
   <p style="font-size:14px;line-height:1.5;margin:10px 0">${esc(u.bio)}</p><div>${u.tags.map(t => `<span class="chip${cp.shared_tags.includes(t) ? ' ok' : ''}">${esc(t)}</span>`).join('')}</div>
   <h3 class="t">So sánh thói quen</h3><div class="legend"><span><i style="background:var(--moss)"></i>Bạn</span><span><i style="background:var(--coral)"></i>${esc(u.name.split(' ').pop())}</span></div>
-  ${cp.habits.map(h => { const m = HAB.find(x => x.k === h.key); return `<div class="cmp"><div class="l"><span>${m.ic} ${m.l}</span><span style="color:${scoreColor(h.sim)}">${h.sim}%</span></div><div class="tr"><div class="dt me" style="left:${(h.me - 1) * 25}%"></div><div class="dt th" style="left:${(h.them - 1) * 25}%"></div></div><div class="ends" style="display:flex;justify-content:space-between;font-size:10px;color:var(--mu);margin-top:6px"><span>${m.a}</span><span>${m.b}</span></div></div>`; }).join('')}
+  ${cp.habits.map(h => { const m = HAB.find(x => x.k === h.key); return `<div class="cmp"><div class="l"><span>${m.ic} ${m.l}</span><span style="color:${scoreColor(h.sim)}">${verdict(h.sim)}</span></div><div class="tr"><div class="dt me" style="left:${(h.me - 1) * 25}%"></div><div class="dt th" style="left:${(h.them - 1) * 25}%"></div></div><div class="ends" style="display:flex;justify-content:space-between;font-size:10px;color:var(--mu);margin-top:6px"><span>${m.a}</span><span>${m.b}</span></div></div>`; }).join('')}
   <h3 class="t">💡 Gợi ý từ hệ thống</h3>${cp.insights.map(i => `<div class="insight"><span>•</span><span>${esc(i)}</span></div>`).join('') || '<p class="mu">Hai bạn khá trung tính, hãy trò chuyện thêm nhé.</p>'}
   <div class="row" style="margin-top:18px"><button class="btn ghost" onclick="closeSheet();flyTop('pass')">✕ Bỏ qua</button><button class="btn coral" onclick="closeSheet();flyTop('like')">💚 Thích</button></div>`);
 }
@@ -277,7 +280,7 @@ function openDetail(u) {
 function showMatch(m) {
   const me = S.user, u = m.user;
   const el = document.createElement('div'); el.className = 'matchov';
-  el.innerHTML = `<div style="text-align:center;font-weight:700;letter-spacing:2px;font-size:12px;opacity:.8;margin-top:10px">ĐỘ HỢP ${m.score}%</div><h1>Hợp cạ rồi!</h1>
+  el.innerHTML = `<div style="text-align:center;font-weight:700;letter-spacing:2px;font-size:12px;opacity:.8;margin-top:10px">${level(m.score).toUpperCase()} · ${m.score}%</div><h1>Hợp cạ rồi!</h1>
   <div class="pair">${av(me, 96)}<div class="heart">💚</div>${av(u, 96)}</div>
   <p style="text-align:center;opacity:.9;font-size:14px;line-height:1.5;margin-bottom:8px">Bạn và <b>${esc(u.name)}</b> đã thích nhau.<br>${esc(u.compat.insights[0] || 'Hãy nhắn tin làm quen nhé!')}</p>
   <div style="font-weight:700;margin:12px 0 4px">🏘️ Gợi ý phòng cho hai bạn</div>

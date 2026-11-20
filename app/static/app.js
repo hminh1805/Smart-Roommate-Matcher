@@ -1,4 +1,4 @@
-﻿/* Chung Nhà – Smart Roommate Matcher (frontend, vanilla JS) */
+/* Chung Nhà – Smart Roommate Matcher (frontend, vanilla JS) */
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = n => Number(n).toLocaleString('vi-VN') + 'đ';
@@ -18,7 +18,7 @@ const PRIOS = [['cheap', '💸', 'Giá rẻ', 'Tiết kiệm nhất'], ['near', 
 const HNAME = Object.fromEntries(HOUSES.map(h => [h[0], h[2]])), PNAME = Object.fromEntries(PRIOS.map(p => [p[0], p[2]]));
 const SVC = [['room', '🏘️', 'Phòng trọ'], ['truck', '🚚', 'Xe chuyển'], ['clean', '🧽', 'Dọn dẹp'], ['used', '🛋️', 'Đồ cũ']];
 
-const S = { token: localStorage.getItem('rm_token'), user: null, tab: 'disc', deck: [], unis: [], filters: { min: 0, uni: '' }, last: null, busy: false, matches: [], unread: 0, svc: 'room', onb: null, loaded: false };
+const S = { token: localStorage.getItem('rm_token'), user: null, tab: 'disc', deck: [], unis: [], filters: { min: 0, uni: '', area: '', house: '', prio: '', bud: '', tag: '', sleep: '', tidy: '', photo: '' }, last: null, busy: false, matches: [], unread: 0, svc: 'room', onb: null, loaded: false };
 let chatTimer = null, pollTimer = null;
 
 /* ---------- helpers ---------- */
@@ -119,11 +119,6 @@ function onboarding(first, step = 0) {
   const prog = `<div class="prog">${[0, 1, 2].map(i => `<i class="${i <= step ? 'on' : ''}"></i>`).join('')}</div>`;
   let body = '', next = 'Tiếp tục';
   if (step === 0) {
-    $('#pu_file').onchange = async e => {
-      const f = e.target.files[0]; if (!f) return; scrape();
-      try { const d = await api('photo', 'POST', { data: await pickPhoto(f) }); S.user.photo = d.user.photo; toast('Đã cập nhật ảnh đại diện 📷'); onboarding(first, 0); } catch (er) { toast(er.message); }
-    };
-    if ($('#pu_del')) $('#pu_del').onclick = async () => { scrape(); const d = await api('photo', 'POST', { data: '' }); S.user.photo = d.user.photo; onboarding(first, 0); };
     body = `<h2 class="t">${first ? 'Chào mừng bạn! 👋' : 'Sửa hồ sơ'}</h2><p class="mu">Giới thiệu nhanh để mọi người biết bạn là ai.</p>
     <div class="photo-up"><div id="pu_av">${av({ emoji: o.emoji, color: o.color, photo: S.user.photo }, 92)}</div><div style="flex:1"><b>Ảnh đại diện</b><p class="mu" style="margin:2px 0 8px">Dùng ảnh thật của bạn để được tin tưởng hơn. Ảnh có mặt người sẽ nhận nhiều lượt thích hơn.</p>
     <label class="btn sm coral" style="display:inline-block;cursor:pointer">📷 ${S.user.photo ? 'Đổi ảnh' : 'Tải ảnh lên'}<input type="file" id="pu_file" accept="image/*" hidden></label>${S.user.photo ? ' <button class="btn sm ghost" id="pu_del">Xóa ảnh</button>' : ''}</div></div>
@@ -152,11 +147,7 @@ function onboarding(first, step = 0) {
   <div class="foot">${step > 0 ? '<button class="btn ghost" id="o_back" style="width:90px">←</button>' : (!first ? '<button class="btn ghost" id="o_cancel" style="width:100px">Hủy</button>' : '')}<button class="btn coral" id="o_next">${next}</button></div>`;
   const scrape = () => {
     if (step === 0) {
-    $('#pu_file').onchange = async e => {
-      const f = e.target.files[0]; if (!f) return; scrape();
-      try { const d = await api('photo', 'POST', { data: await pickPhoto(f) }); S.user.photo = d.user.photo; toast('Đã cập nhật ảnh đại diện 📷'); onboarding(first, 0); } catch (er) { toast(er.message); }
-    };
-    if ($('#pu_del')) $('#pu_del').onclick = async () => { scrape(); const d = await api('photo', 'POST', { data: '' }); S.user.photo = d.user.photo; onboarding(first, 0); }; o.name = $('#o_name').value.trim(); o.age = +$('#o_age').value || 20; o.gender = $('#o_gender').value; o.university = $('#o_uni').value; o.area = $('#o_area').value.trim(); o.bio = $('#o_bio').value.trim(); }
+    o.name = $('#o_name').value.trim(); o.age = +$('#o_age').value || 20; o.gender = $('#o_gender').value; o.university = $('#o_uni').value; o.area = $('#o_area').value.trim(); o.bio = $('#o_bio').value.trim(); }
   };
   if (step === 0) {
     $('#pu_file').onchange = async e => {
@@ -208,11 +199,11 @@ async function refreshUnread() {
 
 /* ---------- discover ---------- */
 async function loadDeck() {
-  const q = new URLSearchParams({ min: S.filters.min, uni: S.filters.uni });
-  const d = await api('discover?' + q); S.deck = d.candidates; S.unis = d.universities; S.loaded = true;
+  const q = filterQuery();
+  const d = await api('discover?' + q); S.deck = d.candidates; S.unis = d.universities; S.areas = d.areas; S.loaded = true;
 }
 async function renderDisc() {
-  $('#main').innerHTML = `<div class="topbar"><div class="logo">🏠 Chung Nhà</div><div class="row" style="gap:8px"><button class="icon-btn" onclick="openFilters()" title="Bộ lọc">⚙️${S.filters.min || S.filters.uni ? '<span class="dot">•</span>' : ''}</button></div></div>
+  $('#main').innerHTML = `<div class="topbar"><div class="logo">🏠 Chung Nhà</div><div class="row" style="gap:8px"><button class="filter-btn" onclick="openFilters()">${FUNNEL}Bộ lọc${filterActive() ? `<span class="fb">${filterActive()}</span>` : ''}</button></div></div>
   <div class="dwrap"><div class="deck" id="deck"><div class="spin"></div></div><div class="acts" id="acts"></div></div>`;
   if (!S.loaded) { try { await loadDeck(); } catch (e) { return toast(e.message); } }
   drawDeck();
@@ -243,7 +234,7 @@ function drawDeck() {
   const deck = $('#deck'); if (!deck) return;
   if (!S.deck.length) {
     deck.innerHTML = `<div class="empty"><div class="em">🎉</div><h2 class="t">Bạn đã xem hết rồi!</h2><p class="mu">Quay lại sau để gặp thêm bạn mới, hoặc xem lại những người đã bỏ qua.</p><br>
-    <button class="btn" onclick="resetPassed()">↺ Xem lại người đã bỏ qua</button>${S.filters.min || S.filters.uni ? '<button class="btn ghost" style="margin-top:10px" onclick="S.filters={min:0,uni:\'\'};S.loaded=false;renderDisc()">Xóa bộ lọc</button>' : ''}</div>`;
+    <button class="btn" onclick="resetPassed()">↺ Xem lại người đã bỏ qua</button>${filterActive() ? '<button class="btn ghost" style="margin-top:10px" onclick="S.filters={...FDEF};S.loaded=false;renderDisc()">Xóa bộ lọc</button>' : ''}</div>`;
     $('#acts').innerHTML = ''; return;
   }
   deck.innerHTML = S.deck.slice(0, 3).map((u, i) => cardHTML(u, i)).reverse().join('');
@@ -296,13 +287,38 @@ async function undoSwipe() {
   try { const d = await api('undo', 'POST'); S.deck.unshift(d.user); drawDeck(); toast('Đã hoàn tác'); } catch (e) { toast(e.message); }
 }
 async function resetPassed() { await api('reset-swipes', 'POST'); S.loaded = false; renderDisc(); }
+const FDEF = { min: 0, uni: '', area: '', house: '', prio: '', bud: '', tag: '', sleep: '', tidy: '', photo: '' };
+const BUDS = { a: ['Dưới 3 triệu', 0, 3], b: ['3 – 4 triệu', 3, 4], c: ['4 – 5 triệu', 4, 5], d: ['Trên 5 triệu', 5, 99] };
+const filterActive = () => Object.keys(FDEF).filter(k => S.filters[k] && S.filters[k] !== FDEF[k]).length;
+function filterQuery() {
+  const f = S.filters, q = new URLSearchParams();
+  ['min', 'uni', 'area', 'house', 'prio', 'tag', 'sleep', 'tidy', 'photo'].forEach(k => { if (f[k]) q.set(k, f[k]); });
+  if (f.bud) { q.set('blo', BUDS[f.bud][1]); q.set('bhi', BUDS[f.bud][2]); }
+  return q.toString();
+}
+const FUNNEL = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg>';
 function openFilters() {
-  openSheet(`<h2 class="t">Bộ lọc</h2><div class="filters">
-  <div class="habit"><div class="hd"><div>Độ hợp tối thiểu</div><span id="fv">${S.filters.min}%</span></div><input type="range" min="0" max="90" step="5" value="${S.filters.min}" id="f_min"></div>
-  <div class="field"><label>Trường</label><select class="input" id="f_uni"><option value="">Tất cả các trường</option>${S.unis.concat(S.filters.uni && !S.unis.includes(S.filters.uni) ? [S.filters.uni] : []).map(x => `<option ${S.filters.uni === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></div></div>
-  <button class="btn" style="margin-top:20px" id="f_ok">Áp dụng</button>`);
-  $('#f_min').oninput = e => $('#fv').textContent = e.target.value + '%';
-  $('#f_ok').onclick = () => { S.filters = { min: +$('#f_min').value, uni: $('#f_uni').value }; S.loaded = false; closeSheet(); renderDisc(); };
+  const F = { ...FDEF, ...S.filters };
+  const grp = (key, label, opts) => `<div class="field"><label>${label}</label><div class="fgrp" data-g="${key}">${opts.map(([v, t]) => `<button class="chip fchip ${F[key] === v ? 'sel' : ''}" data-v="${esc(v)}">${esc(t)}</button>`).join('')}</div></div>`;
+  openSheet(`<div class="row"><h2 class="t" style="flex:1">Bộ lọc</h2><button class="btn sm ghost" id="f_clear">Xóa hết</button></div>
+  <div class="habit"><div class="hd"><div>Độ hợp tối thiểu</div><span id="fv">${F.min ? F.min + '%' : 'Tất cả'}</span></div><input type="range" min="0" max="90" step="10" value="${F.min}" id="f_min"></div>
+  ${grp('area', '📍 Khu vực muốn thuê', (S.areas || []).map(a => [a, a]))}
+  ${grp('bud', '💰 Tiền thuê tối đa của họ', Object.entries(BUDS).map(([k, v]) => [k, v[0]]))}
+  ${grp('house', '🏠 Loại nhà', HOUSES.map(h => [h[0], h[1] + ' ' + h[2]]))}
+  ${grp('prio', '⭐ Họ ưu tiên', PRIOS.map(p => [p[0], p[1] + ' ' + p[2]]))}
+  ${grp('uni', '🎓 Trường', S.unis.map(u => [u, u]))}
+  ${grp('sleep', '🌙 Giờ giấc', [['early', 'Ngủ sớm, dậy sớm'], ['late', 'Cú đêm']])}
+  ${grp('tidy', '🧹 Sạch sẽ', [['high', 'Người gọn gàng']])}
+  ${grp('tag', '🎯 Sở thích', TAGS.map(t => [t, t]))}
+  ${grp('photo', '📷 Hồ sơ', [['1', 'Chỉ người có ảnh thật']])}
+  <button class="btn" style="margin-top:20px;position:sticky;bottom:0" id="f_ok">Áp dụng</button>`);
+  $('#f_min').oninput = e => { F.min = +e.target.value; $('#fv').textContent = F.min ? F.min + '%' : 'Tất cả'; };
+  document.querySelectorAll('.fgrp').forEach(g => g.querySelectorAll('.fchip').forEach(b => b.onclick = () => {
+    const k = g.dataset.g, v = b.dataset.v; F[k] = F[k] === v ? '' : v;
+    g.querySelectorAll('.fchip').forEach(x => x.classList.toggle('sel', x.dataset.v === F[k]));
+  }));
+  $('#f_clear').onclick = () => { S.filters = { ...FDEF }; S.loaded = false; closeSheet(); renderDisc(); };
+  $('#f_ok').onclick = () => { S.filters = F; S.loaded = false; closeSheet(); renderDisc(); };
 }
 function openDetail(u) {
   if (!u) return; const cp = u.compat;
@@ -474,4 +490,3 @@ async function openPartner() {
   <h3 class="t">Doanh thu ước tính</h3><div class="card" style="text-align:center"><div class="price" style="font-size:28px">${fmt(s.sponsor_revenue + s.commission)}</div><div class="mu">Phí hiển thị + hoa hồng</div></div>`);
 }
 boot();
-

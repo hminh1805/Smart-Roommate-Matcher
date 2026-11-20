@@ -622,6 +622,26 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             if uni and r["university"] != uni:
                 continue
+            if q.get("area") and q["area"].lower() not in (r["area"] or "").lower():
+                continue
+            if q.get("house") and r["house_type"] != q["house"]:
+                continue
+            if q.get("prio") and r["priority"] != q["prio"]:
+                continue
+            if q.get("blo") and r["budget_max"] < float(q["blo"]):
+                continue
+            if q.get("bhi") and r["budget_max"] > float(q["bhi"]):
+                continue
+            if q.get("tag") and q["tag"] not in json.loads(r["tags"] or "[]"):
+                continue
+            if q.get("sleep") == "early" and r["sleep"] > 2:
+                continue
+            if q.get("sleep") == "late" and r["sleep"] < 4:
+                continue
+            if q.get("tidy") == "high" and r["tidy"] < 4:
+                continue
+            if q.get("photo") == "1" and not r["photo_v"]:
+                continue
             d = user_row_to_dict(r, me)
             if d["compat"]["score"] < min_score:
                 continue
@@ -631,7 +651,8 @@ class Handler(BaseHTTPRequestHandler):
             out.append(d)
         out.sort(key=lambda d: (not d["liked_you"], -d["compat"]["score"]))
         unis = sorted({r["university"] for r in c.execute("SELECT university FROM users WHERE onboarded=1").fetchall() if r["university"]})
-        return {"candidates": out[:40], "total": len(out), "universities": unis}
+        areas = sorted({r["area"] for r in c.execute("SELECT area FROM users WHERE onboarded=1 AND id!=?", (uid,)).fetchall() if r["area"]})
+        return {"candidates": out[:40], "total": len(out), "universities": unis, "areas": areas}
 
     def swipe(self, c, me, b):
         uid, to = me["id"], int(b.get("to", 0))

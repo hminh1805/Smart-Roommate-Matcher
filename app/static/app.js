@@ -146,7 +146,7 @@ function onboarding(first, step = 0) {
     <div class="habit"><div class="hd"><div>💰 Tiền thuê tối đa mỗi người / tháng</div><span id="bv">${o.budget_max} triệu</span></div>
     <input type="range" min="1" max="10" step="0.5" value="${o.budget_max}" id="bmax"><div class="ends"><span>1 triệu</span><span>10 triệu</span></div></div>
     <div class="field"><label>Sở thích & lối sống</label><div id="o_tags">${TAGS.map(t => `<button class="chip ${o.tags.includes(t) ? 'sel' : ''}" data-t="${t}" style="border:0;font-size:13px;padding:8px 12px">${t}</button>`).join('')}</div></div>`;
-    next = first ? 'Bắt đầu tìm bạn cùng phòng 🚀' : 'Lưu thay đổi';
+    next = first ? 'Bắt đầu tìm bạn 🚀' : 'Lưu thay đổi';
   }
   $('#screen').innerHTML = `${prog}<div class="view" style="padding-top:8px">${body}<div class="err" id="o_err"></div></div>
   <div class="foot">${step > 0 ? '<button class="btn ghost" id="o_back" style="width:90px">←</button>' : (!first ? '<button class="btn ghost" id="o_cancel" style="width:100px">Hủy</button>' : '')}<button class="btn coral" id="o_next">${next}</button></div>`;
@@ -304,6 +304,13 @@ function bindDrag(el) {
     const nx = el.previousElementSibling; if (nx) { nx.style.transition = 'transform .28s ease'; nx.style.transform = ''; }
     dx = dy = 0;
   };
+  el.onpointercancel = () => {
+    if (!on) return; on = false;
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    el.style.transition = 'transform .28s ease'; el.style.transform = ''; Object.values(st).forEach(s => s.style.opacity = 0);
+    const nx = el.previousElementSibling; if (nx) { nx.style.transition = 'transform .28s ease'; nx.style.transform = ''; }
+    dx = dy = 0;
+  };
 }
 function flyTop(kind) { if (!topCard()) return; fly(kind, 0, 0); }
 function fly(kind, dx, dy) {
@@ -341,8 +348,15 @@ async function commitSwipe(u, kind) {
   try {
     const d = await api('swipe', 'POST', { to: u.id, kind });
     if (d.super_left !== undefined && S.user) { S.user.super_left = d.super_left; syncActs(); }
-    if (d.matched) { S.last = null; refreshUnread(); showMatch(d.match); }
-    else if (kind !== 'pass') toast(d.note || 'Đã gửi lượt thích 💚');
+    if (d.matched) {
+      S.last = null;
+      S.matches = [d.match, ...S.matches.filter(m => m.id !== d.match.id)];
+      S.matchesLoaded = true;
+      if (d.new && S.user?.counts) S.user.counts.matches++;
+      if (S.tab === 'disc' && !$('#chatpage') && !$('.matchov')) showMatch(d.match);
+      else toast('🎉 Hợp cạ với ' + d.match.user.name + '! Xem ở tab Tin nhắn');
+      refreshUnread();
+    } else if (kind !== 'pass') toast(d.note || 'Đã gửi lượt thích 💚');
   } catch (e) { toast(e.message); }
   if (!S.deck.length) {
     try { await loadDeck(); } catch (e) { }
@@ -351,7 +365,12 @@ async function commitSwipe(u, kind) {
 }
 async function undoSwipe() {
   if (S.busy) return;
-  try { const d = await api('undo', 'POST'); S.deck.unshift(d.user); drawDeck(); toast('Đã hoàn tác'); } catch (e) { toast(e.message); }
+  try {
+    const d = await api('undo', 'POST');
+    if (S.user?.counts) S.user.counts.swiped = Math.max(0, S.user.counts.swiped - 1);
+    if (d.super_left !== undefined && S.user) S.user.super_left = d.super_left;
+    S.deck.unshift(d.user); drawDeck(); toast('Đã hoàn tác');
+  } catch (e) { toast(e.message); }
 }
 async function resetPassed() { await api('reset-swipes', 'POST'); S.loaded = false; renderDisc(); }
 const FDEF = { min: 0, uni: '', area: '', house: '', prio: '', bud: '', tag: '', sleep: '', tidy: '', photo: '' };
@@ -378,7 +397,7 @@ function openFilters() {
   ${grp('tidy', '🧹 Sạch sẽ', [['high', 'Người gọn gàng']])}
   ${grp('tag', '🎯 Sở thích', TAGS.map(t => [t, t]))}
   ${grp('photo', '📷 Hồ sơ', [['1', 'Chỉ người có ảnh thật']])}
-  <button class="btn" style="margin-top:20px;position:sticky;bottom:0" id="f_ok">Áp dụng</button>`);
+  <div class="fstick"><button class="btn" id="f_ok">Áp dụng</button></div>`);
   $('#f_min').oninput = e => { F.min = +e.target.value; $('#fv').textContent = F.min ? F.min + '%' : 'Tất cả'; };
   document.querySelectorAll('.fgrp').forEach(g => g.querySelectorAll('.fchip').forEach(b => b.onclick = () => {
     const k = g.dataset.g, v = b.dataset.v; F[k] = F[k] === v ? '' : v;
@@ -387,7 +406,7 @@ function openFilters() {
   $('#f_clear').onclick = () => { S.filters = { ...FDEF }; S.loaded = false; closeSheet(); renderDisc(); };
   $('#f_ok').onclick = () => { S.filters = F; S.loaded = false; closeSheet(); renderDisc(); };
 }
-function openDetail(u) {
+function openDetail(u, actions = true) {
   if (!u) return; const cp = u.compat;
   openSheet(`<div class="dhero c${u.color}">${avBig(u, 64).replace('margin:auto', 'margin:0')}<div><div style="font-family:var(--display);font-size:24px;font-weight:800">${esc(u.name)}, ${u.age}</div><div style="font-size:13px;opacity:.9">🎓 ${esc(u.university)}<br>📍 ${esc(u.area || 'Chưa rõ')} · 💰 Tối đa ${u.budget_max} tr</div></div></div>
   <div class="row"><div class="grow"><span class="mu">Mức hợp nhau · ${level(cp.score)}</span><div style="font-family:var(--display);font-size:38px;font-weight:800;color:${scoreColor(cp.score)}">${cp.score}%</div></div><div class="grow" style="text-align:right"><span class="mu">Ngân sách thuê</span><div style="font-family:var(--display);font-size:20px;font-weight:800">${cp.budget >= 60 ? 'Khớp nhau' : cp.budget >= 25 ? 'Hơi lệch' : 'Lệch nhiều'}</div></div></div>
@@ -396,7 +415,7 @@ function openDetail(u) {
   ${cp.habits.map(h => { const m = HAB.find(x => x.k === h.key); return `<div class="cmp"><div class="l"><span>${m.ic} ${m.l}</span><span style="color:${scoreColor(h.sim)}">${verdict(h.sim)}</span></div><div class="tr"><div class="dt me" style="left:${(h.me - 1) * 25}%"></div><div class="dt th" style="left:${(h.them - 1) * 25}%"></div></div><div class="ends" style="display:flex;justify-content:space-between;font-size:10px;color:var(--mu);margin-top:6px"><span>${m.a}</span><span>${m.b}</span></div></div>`; }).join('')}
   <h3 class="t">🏘️ Nhu cầu thuê nhà</h3><div class="card" style="padding:0 14px">${[['💰 Tiền thuê tối đa', S.user.budget_max + ' triệu', u.budget_max + ' triệu', Math.abs(S.user.budget_max - u.budget_max) <= 0.5 ? 100 : Math.abs(S.user.budget_max - u.budget_max) <= 1.5 ? 75 : 25], ['🏠 Loại nhà', HNAME[S.user.house_type], HNAME[u.house_type], S.user.house_type === u.house_type ? 100 : 50], ['⭐ Ưu tiên', PNAME[S.user.priority], PNAME[u.priority], S.user.priority === u.priority ? 100 : 50]].map(([l, a, b, s]) => `<div class="ordr" style="align-items:center"><div><b>${l}</b><div class="mu">Bạn: ${esc(a)} · ${esc(u.name.split(' ').pop())}: ${esc(b)}</div></div><b style="color:${scoreColor(s)};white-space:nowrap">${s === 100 ? 'Giống' : s >= 75 ? 'Gần giống' : s >= 50 ? 'Hơi lệch' : 'Lệch'}</b></div>`).join('')}</div>
   <h3 class="t">💡 Gợi ý từ hệ thống</h3>${cp.insights.map(i => `<div class="insight"><span>•</span><span>${esc(i)}</span></div>`).join('') || '<p class="mu">Hai bạn khá trung tính, hãy trò chuyện thêm nhé.</p>'}
-  <div class="row" style="margin-top:18px"><button class="btn ghost" onclick="closeSheet();flyTop('pass')">✕ Bỏ qua</button><button class="btn coral" onclick="closeSheet();flyTop('like')">💚 Thích</button></div>`);
+  ${actions ? '<div class="row" style="margin-top:18px"><button class="btn ghost" onclick="closeSheet();flyTop(\'pass\')">✕ Bỏ qua</button><button class="btn coral" onclick="closeSheet();flyTop(\'like\')">💚 Thích</button></div>' : '<button class="btn ghost" style="margin-top:18px" onclick="closeSheet()">Đóng</button>'}`);
 }
 
 /* ---------- match overlay ---------- */
@@ -449,6 +468,7 @@ async function openChat(id) {
   <div class="composer"><input class="input" id="c_in" placeholder="Nhập tin nhắn…" maxlength="1000" autocomplete="off"><button class="send" id="c_send">➤</button></div>`;
   $('#overlay').appendChild(page);
   let last = 0, chatBusy = false, chatPromise = null;
+  const seen = new Set();
   const msgs = $('#msgs');
   const poll = async (force = false) => {
     if (!$('#msgs')) return;
@@ -466,10 +486,18 @@ async function openChat(id) {
         const wasBottom = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80;
         msgs.querySelector('.typing')?.remove();
         if (d.messages.length) msgs.querySelectorAll('.msg.pending.sent').forEach(x => x.remove());
-        d.messages.forEach(m => { last = Math.max(last, m.id); const e = document.createElement('div'); e.className = 'msg' + (m.mine ? ' me' : ''); e.innerHTML = `${esc(m.text)}<time>${timeStr(m.at)}</time>`; msgs.appendChild(e); });
+        let added = false;
+        d.messages.forEach(m => {
+          if (seen.has(m.id)) return;
+          seen.add(m.id);
+          added = true;
+          const e = document.createElement('div'); e.className = 'msg' + (m.mine ? ' me' : ''); e.innerHTML = `${esc(m.text)}<time>${timeStr(m.at)}</time>`; msgs.appendChild(e);
+        });
+        if (typeof d.cursor === 'number') last = d.cursor;
+        else if (d.messages.length) last = Math.max(last, d.messages[d.messages.length - 1].id);
         if (d.messages.length) $('#ice') && d.messages.some(m => m.mine) && $('#ice').remove();
         if (d.typing) { msgs.insertAdjacentHTML('beforeend', '<div class="typing"><i></i><i></i><i></i></div>'); $('#c_sub').textContent = 'đang nhập…'; } else $('#c_sub').textContent = mt.user.university;
-        if (d.messages.length || d.typing) if (wasBottom || last <= d.messages[0]?.id) msgs.scrollTop = msgs.scrollHeight;
+        if (added || d.typing) if (wasBottom || last <= d.messages[0]?.id) msgs.scrollTop = msgs.scrollHeight;
       } catch (e) { }
     })();
     try { await chatPromise; } finally { chatBusy = false; chatPromise = null; }
@@ -497,13 +525,23 @@ async function openChat(id) {
   $('#c_send').onclick = () => send(); $('#c_in').onkeydown = e => { if (e.key === 'Enter') send(); };
   $('#ice').querySelectorAll('button').forEach(b => b.onclick = () => { send(b.textContent); });
   $('#c_back').onclick = () => { closeChat(); refreshUnread(); if (S.tab === 'mat') drawMatches(); };
-  $('#c_more').onclick = () => openSheet(`<h2 class="t">${esc(mt.user.name)}</h2>
-    <button class="btn" onclick="closeSheet();showRoomsFor(${id})">🏘️ Xem phòng gợi ý cho 2 bạn</button>
-    <button class="btn ghost" style="margin-top:10px" onclick="closeSheet();openDetail(S.matches.find(m=>m.id==${id}).user)">👤 Xem độ hợp chi tiết</button>
-    <button class="btn ghost" style="margin-top:10px;color:var(--bad)" id="unm">Hủy match</button>`);
-  setTimeout(() => { const u = $('#unm'); if (u) u.onclick = async () => { if (!confirm('Hủy match với ' + mt.user.name + '?')) return; await api(`matches/${id}/unmatch`, 'POST'); closeSheet(); closeChat(); S.loaded = false; loadMatches(); refreshUnread(); }; }, 0);
-  const obs = new MutationObserver(() => { const u = $('#unm'); if (u && !u.onclick) u.onclick = async () => { if (!confirm('Hủy match với ' + mt.user.name + '?')) return; await api(`matches/${id}/unmatch`, 'POST'); closeSheet(); closeChat(); loadMatches(); refreshUnread(); }; });
-  obs.observe($('#sheet'), { childList: true });
+  $('#c_more').onclick = () => {
+    openSheet(`<h2 class="t">${esc(mt.user.name)}</h2>
+      <button class="btn" id="cm_rooms">🏘️ Xem phòng gợi ý cho 2 bạn</button>
+      <button class="btn ghost" style="margin-top:10px" id="cm_detail">👤 Xem độ hợp chi tiết</button>
+      <button class="btn ghost" style="margin-top:10px;color:var(--bad)" id="unm">Hủy match</button>`);
+    $('#cm_rooms').onclick = () => { closeSheet(); showRoomsFor(id); };
+    $('#cm_detail').onclick = () => { closeSheet(); openDetail(mt.user, false); };
+    $('#unm').onclick = async () => {
+      if (!confirm('Hủy match với ' + mt.user.name + '?')) return;
+      try {
+        await api(`matches/${id}/unmatch`, 'POST');
+        closeSheet(); closeChat(); S.loaded = false;
+        if (S.user?.counts) S.user.counts.matches = Math.max(0, S.user.counts.matches - 1);
+        await loadMatches();
+      } catch (e) { toast(e.message); }
+    };
+  };
   await poll(true); msgs.scrollTop = msgs.scrollHeight;
   chatTimer = setInterval(() => poll(), 2500);
 }
@@ -559,20 +597,20 @@ function bookSheet(kind, it) {
   <p class="mu" style="margin:10px 0">${room ? 'Miễn phí xem phòng. Chủ trọ sẽ liên hệ xác nhận lịch.' : 'Thanh toán trực tiếp cho đối tác sau khi hoàn thành.'}</p>
   <button class="btn coral" id="b_ok">Xác nhận</button>`);
   $('#b_ok').onclick = async () => {
-    $('#b_ok').disabled = true;
+    $('#b_ok').disabled = true; $('#b_ok').textContent = 'Đang gửi…';
     try { await api('orders', 'POST', { kind: it.kind || kind, item_id: it.id, date: $('#b_date').value, note: $('#b_note').value }); closeSheet(); confetti(40); toast('✅ Đã gửi yêu cầu! Xem trong Hồ sơ → Đơn của tôi'); if (S.user) S.user.counts.orders++; }
-    catch (e) { toast(e.message); $('#b_ok').disabled = false; }
+    catch (e) { toast(e.message); $('#b_ok').disabled = false; $('#b_ok').textContent = 'Xác nhận'; }
   };
 }
 
 /* ---------- profile ---------- */
 function radar(h) {
-  const n = HAB.length, R = 78, cx = 110, cy = 100;
+  const n = HAB.length, R = 72, cx = 110, cy = 108;
   const pt = (i, v) => { const a = -Math.PI / 2 + i * 2 * Math.PI / n; return [cx + Math.cos(a) * R * v / 5, cy + Math.sin(a) * R * v / 5]; };
   const grid = [1, 2, 3, 4, 5].map(v => `<polygon points="${HAB.map((_, i) => pt(i, v).join(',')).join(' ')}" fill="none" stroke="var(--line)"/>`).join('');
   const poly = HAB.map((x, i) => pt(i, h[x.k]).join(',')).join(' ');
-  const labels = HAB.map((x, i) => { const [px, py] = pt(i, 6.3); return `<text x="${px}" y="${py + 4}" text-anchor="middle" font-size="15">${x.ic}</text>`; }).join('');
-  return `<svg viewBox="0 0 220 200" style="width:100%;max-width:260px;display:block;margin:auto">${grid}<polygon points="${poly}" fill="rgba(242,96,58,.25)" stroke="var(--coral)" stroke-width="2.5" stroke-linejoin="round"/>${HAB.map((x, i) => { const [px, py] = pt(i, h[x.k]); return `<circle cx="${px}" cy="${py}" r="4" fill="var(--coral)"/>`; }).join('')}${labels}</svg>`;
+  const labels = HAB.map((x, i) => { const [px, py] = pt(i, 6.2); return `<text x="${px}" y="${py + 5}" text-anchor="middle" font-size="15">${x.ic}</text>`; }).join('');
+  return `<svg viewBox="0 0 220 205" style="width:100%;max-width:260px;display:block;margin:auto">${grid}<polygon points="${poly}" fill="rgba(242,96,58,.25)" stroke="var(--coral)" stroke-width="2.5" stroke-linejoin="round"/>${HAB.map((x, i) => { const [px, py] = pt(i, h[x.k]); return `<circle cx="${px}" cy="${py}" r="4" fill="var(--coral)"/>`; }).join('')}${labels}</svg>`;
 }
 function drawMe() {
   const u = S.user; if (!u || S.tab !== 'me') return;

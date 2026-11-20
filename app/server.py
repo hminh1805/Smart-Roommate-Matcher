@@ -309,7 +309,7 @@ def init_db():
         c.execute("PRAGMA journal_mode=WAL")
         cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
     else:
-        cols = {r["column_name"] for r in c.execute("SELECT column_name FROM information_schema.columns WHERE table_name='users'").fetchall()}
+        cols = {r["column_name"] for r in c.execute("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='users'").fetchall()}
     if "house_type" not in cols:
         c.execute("ALTER TABLE users ADD COLUMN house_type TEXT DEFAULT 'tro'")
         c.execute("ALTER TABLE users ADD COLUMN priority TEXT DEFAULT 'cheap'")
@@ -931,7 +931,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def discover(self, c, me, q):
         uid = me["id"]
-        min_score = int(q.get("min", 0) or 0)
+        try:
+            min_score = int(q.get("min", 0) or 0)
+            blo = float(q["blo"]) if q.get("blo") else None
+            bhi = float(q["bhi"]) if q.get("bhi") else None
+        except (TypeError, ValueError):
+            raise Err(400, "Bộ lọc không hợp lệ")
         uni = q.get("uni", "")
         rows = c.execute(
             "SELECT u.*, ls.kind AS _lk"
@@ -953,9 +958,9 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             if q.get("prio") and r["priority"] != q["prio"]:
                 continue
-            if q.get("blo") and r["budget_max"] < float(q["blo"]):
+            if blo is not None and r["budget_max"] < blo:
                 continue
-            if q.get("bhi") and r["budget_max"] > float(q["bhi"]):
+            if bhi is not None and r["budget_max"] > bhi:
                 continue
             if q.get("tag") and q["tag"] not in json.loads(r["tags"] or "[]"):
                 continue
@@ -982,7 +987,11 @@ class Handler(BaseHTTPRequestHandler):
         return {"candidates": out[:40], "total": len(out), "universities": unis, "areas": areas}
 
     def swipe(self, c, me, b):
-        uid, to = me["id"], int(b.get("to", 0))
+        uid = me["id"]
+        try:
+            to = int(b.get("to", 0))
+        except (TypeError, ValueError):
+            raise Err(400, "Người dùng không hợp lệ")
         kind = b.get("kind")
         if kind not in ("like", "pass", "super"):
             raise Err(400, "Hành động không hợp lệ")
@@ -1027,7 +1036,11 @@ class Handler(BaseHTTPRequestHandler):
             raise Err(400, "Đã match rồi, không thể hoàn tác")
         c.execute("DELETE FROM swipes WHERE from_id=? AND to_id=?", (row["from_id"], row["to_id"]))
         other = c.execute("SELECT * FROM users WHERE id=?", (row["to_id"],)).fetchone()
-        return {"user": user_row_to_dict(other, me)}
+        res = {"user": user_row_to_dict(other, me)}
+        if row["kind"] == "super":
+            used = int(c.execute("SELECT COUNT(*) n FROM swipes WHERE from_id=? AND kind='super' AND created>?", (me["id"], time.time() - 86400)).fetchone()["n"] or 0)
+            res["super_left"] = max(0, SUPER_DAILY - used)
+        return res
 
     def match_ops(self, c, me, mid, op, method, q):
         uid = me["id"]
@@ -1054,7 +1067,10 @@ class Handler(BaseHTTPRequestHandler):
             if other["is_bot"]:
                 bot_say(c, mid, other_id, bot_reply(other, text, me["name"]), random.uniform(1.2, 2.8))
             return {"ok": True}
-        after = int(q.get("after", 0) or 0)
+        try:
+            after = int(q.get("after", 0) or 0)
+        except (TypeError, ValueError):
+            after = 0
         rows = c.execute(
             "SELECT id, sender, text, created, visible_at, read"
             " FROM messages WHERE match_id=? AND (id>? OR (sender=? AND visible_at>?))"
@@ -1063,14 +1079,21 @@ class Handler(BaseHTTPRequestHandler):
         ).fetchall()
         if any(r["sender"] != uid and not r["read"] and r["visible_at"] <= now for r in rows):
             c.execute("UPDATE messages SET read=1 WHERE match_id=? AND sender!=? AND read=0 AND visible_at<=?", (mid, uid, now))
-        msgs = [{"id": r["id"], "mine": r["sender"] == uid, "text": r["text"], "at": r["created"]}
-                for r in rows if r["id"] > after and r["visible_at"] <= now]
-        typing = any(r["sender"] == other_id and r["visible_at"] > now for r in rows)
-        return {"messages": msgs, "typing": typing, "user": user_row_to_dict(other, me)}
+        vis_rows = [r for r in rows if r["id"] > after and r["visible_at"] <= now]
+        msgs = [{"id": r["id"], "mine": r["sender"] == uid, "text": r["text"], "at": r["created"]} for r in vis_rows]
+        pend_ids = [r["id"] for r in rows if r["visible_at"] > now]
+        cursor = max((r["id"] for r in vis_rows), default=after)
+        if pend_ids:
+            cursor = max(after, min(cursor, min(pend_ids) - 1))
+        typing = bool(pend_ids)
+        return {"messages": msgs, "cursor": cursor, "typing": typing, "user": user_row_to_dict(other, me)}
 
     def make_order(self, c, me, b):
         kind = b.get("kind")
-        item_id = int(b.get("item_id", 0))
+        try:
+            item_id = int(b.get("item_id", 0))
+        except (TypeError, ValueError):
+            raise Err(400, "Dịch vụ không hợp lệ")
         if kind == "room":
             r = c.execute("SELECT * FROM rooms WHERE id=?", (item_id,)).fetchone()
             if not r:

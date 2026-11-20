@@ -3,15 +3,18 @@
 
 Chạy:  python server.py   ->  http://localhost:8000
 """
+import gzip
 import hashlib
 import json
 import mimetypes
 import os
+import queue
 import random
 import re
 import secrets
 import sqlite3
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -46,11 +49,88 @@ BOT_LIKE_THRESHOLD = 66
 SUPER_DAILY = 3
 
 
-# ----------------------------------------------------------------- database
+# ----------------------------------------------------------------- database & caches
+_PG_POOL = queue.LifoQueue(maxsize=8)
+_AUTH_CACHE = {}
+_AUTH_LOCK = threading.Lock()
+_ROOMS_CACHE = []
+_SERVICES_CACHE = {}
+_STATIC_CACHE = {}
+
+
+def _cache_get_user(tok):
+    if not tok:
+        return None
+    with _AUTH_LOCK:
+        item = _AUTH_CACHE.get(tok)
+        if not item:
+            return None
+        u, exp = item
+        if time.time() > exp:
+            _AUTH_CACHE.pop(tok, None)
+            return None
+        return dict(u)
+
+
+def _cache_set_user(tok, row):
+    if not tok or not row:
+        return
+    with _AUTH_LOCK:
+        if len(_AUTH_CACHE) > 2000:
+            _AUTH_CACHE.clear()
+        _AUTH_CACHE[tok] = (dict(row), time.time() + 60)
+
+
+def _cache_drop_token(tok):
+    if not tok:
+        return
+    with _AUTH_LOCK:
+        _AUTH_CACHE.pop(tok, None)
+
+
+def _cache_drop_user(uid):
+    with _AUTH_LOCK:
+        for k in [k for k, (u, _) in _AUTH_CACHE.items() if u["id"] == uid]:
+            _AUTH_CACHE.pop(k, None)
+
+
 class DB:
     def __init__(self):
+        self._closed = False
         if IS_PG:
-            self.conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, prepare_threshold=None)
+            self.conn = None
+            now = time.time()
+            while True:
+                try:
+                    conn, ts = _PG_POOL.get_nowait()
+                except queue.Empty:
+                    break
+                if conn.closed or now - ts > 240:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    continue
+                try:
+                    if conn.info.transaction_status != 0:
+                        conn.rollback()
+                    self.conn = conn
+                    break
+                except Exception:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            if self.conn is None:
+                self.conn = psycopg.connect(
+                    DATABASE_URL,
+                    row_factory=dict_row,
+                    prepare_threshold=None,
+                    keepalives=1,
+                    keepalives_idle=30,
+                    keepalives_interval=10,
+                    keepalives_count=3,
+                )
         else:
             self.conn = sqlite3.connect(DB_PATH, timeout=15)
             self.conn.row_factory = sqlite3.Row
@@ -77,8 +157,42 @@ class DB:
     def commit(self):
         self.conn.commit()
 
+    def rollback(self):
+        try:
+            if self.conn and (not IS_PG or not self.conn.closed):
+                self.conn.rollback()
+        except Exception:
+            pass
+
+    def discard(self):
+        self._closed = True
+        try:
+            if self.conn:
+                self.conn.close()
+        except Exception:
+            pass
+        self.conn = None
+
     def close(self):
-        self.conn.close()
+        if self._closed or not self.conn:
+            return
+        self._closed = True
+        conn = self.conn
+        self.conn = None
+        if IS_PG:
+            try:
+                if conn.closed:
+                    return
+                if conn.info.transaction_status != 0:
+                    conn.rollback()
+                _PG_POOL.put_nowait((conn, time.time()))
+                return
+            except Exception:
+                pass
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def db():
@@ -102,6 +216,12 @@ CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY, kind TEXT, name TEXT
 CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, kind TEXT, item_id INTEGER, item_name TEXT, amount INTEGER, commission INTEGER, note TEXT, date TEXT, status TEXT DEFAULT 'new', created REAL);
 CREATE TABLE IF NOT EXISTS impressions(id INTEGER PRIMARY KEY AUTOINCREMENT, room_id INTEGER, user_id INTEGER, created REAL);
 CREATE INDEX IF NOT EXISTS ix_msg ON messages(match_id,id);
+CREATE INDEX IF NOT EXISTS ix_swipes_to ON swipes(to_id,from_id);
+CREATE INDEX IF NOT EXISTS ix_swipes_from_kind ON swipes(from_id,kind,created);
+CREATE INDEX IF NOT EXISTS ix_matches_a ON matches(a,active);
+CREATE INDEX IF NOT EXISTS ix_matches_b ON matches(b,active);
+CREATE INDEX IF NOT EXISTS ix_orders_user ON orders(user_id,id);
+CREATE INDEX IF NOT EXISTS ix_users_onb ON users(onboarded);
 """
 
 BOTS = [
@@ -153,7 +273,31 @@ HOUSE_TYPES = {"tro": "Phòng trọ", "mini": "Chung cư mini", "chungcu": "Căn
 PRIORITIES = {"cheap": "Giá rẻ", "near": "Gần trường", "quality": "Sạch đẹp, tiện nghi"}
 
 
+def _load_catalog(c):
+    global _ROOMS_CACHE, _SERVICES_CACHE
+    _ROOMS_CACHE = [room_dict(r) for r in c.execute("SELECT * FROM rooms ORDER BY sponsored DESC, price").fetchall()]
+    svc = {}
+    for s in c.execute("SELECT * FROM services ORDER BY promoted DESC, rating DESC").fetchall():
+        sd = service_dict(s)
+        svc.setdefault(sd["kind"], []).append(sd)
+    _SERVICES_CACHE = svc
+
+
+def _get_rooms(c):
+    if not _ROOMS_CACHE:
+        _load_catalog(c)
+    return _ROOMS_CACHE
+
+
+def _get_services(c, kind):
+    if not _SERVICES_CACHE:
+        _load_catalog(c)
+    return _SERVICES_CACHE.get(kind, [])
+
+
 def init_db():
+    with _AUTH_LOCK:
+        _AUTH_CACHE.clear()
     c = db()
     schema = SCHEMA
     if IS_PG:
@@ -194,6 +338,7 @@ def init_db():
         for s in SERVICES:
             c.execute("INSERT INTO services VALUES(?,?,?,?,?,?,?,?,?,?)", s)
     c.commit()
+    _load_catalog(c)
     c.close()
 
 
@@ -268,18 +413,65 @@ def gender_ok(a, b):
     return True
 
 
-def match_public(c, m, me_id):
+def match_public(c, m, me_id, me=None, other=None, fresh=False):
     other_id = m["b"] if m["a"] == me_id else m["a"]
-    me = c.execute("SELECT * FROM users WHERE id=?", (me_id,)).fetchone()
-    other = c.execute("SELECT * FROM users WHERE id=?", (other_id,)).fetchone()
-    now = time.time()
-    last = c.execute("SELECT * FROM messages WHERE match_id=? AND visible_at<=? ORDER BY id DESC LIMIT 1", (m["id"], now)).fetchone()
-    unread = c.execute("SELECT COUNT(*) n FROM messages WHERE match_id=? AND sender!=? AND read=0 AND visible_at<=?", (m["id"], me_id, now)).fetchone()["n"]
+    if me is None:
+        me = c.execute("SELECT * FROM users WHERE id=?", (me_id,)).fetchone()
+    if other is None:
+        other = c.execute("SELECT * FROM users WHERE id=?", (other_id,)).fetchone()
+    if fresh:
+        last, unread = None, 0
+    else:
+        now = time.time()
+        last = c.execute("SELECT * FROM messages WHERE match_id=? AND visible_at<=? ORDER BY id DESC LIMIT 1", (m["id"], now)).fetchone()
+        unread = int(c.execute("SELECT COUNT(*) n FROM messages WHERE match_id=? AND sender!=? AND read=0 AND visible_at<=?", (m["id"], me_id, now)).fetchone()["n"] or 0)
     return {
         "id": m["id"], "score": m["score"], "created": m["created"], "unread": unread,
         "user": user_row_to_dict(other, me),
         "last": {"text": last["text"], "mine": last["sender"] == me_id, "at": last["created"]} if last else None,
     }
+
+
+def matches_public(c, me):
+    uid = me["id"]
+    rows = c.execute(
+        "SELECT u.*, m.id AS _mid, m.score AS _mscore, m.created AS _mcreated"
+        " FROM matches m"
+        " JOIN users u ON u.id = CASE WHEN m.a=? THEN m.b ELSE m.a END"
+        " WHERE (m.a=? OR m.b=?) AND m.active=1"
+        " ORDER BY m.id DESC",
+        (uid, uid, uid),
+    ).fetchall()
+    if not rows:
+        return []
+    now = time.time()
+    agg_rows = c.execute(
+        "SELECT msg.match_id, msg.sender, msg.text, msg.created, agg.unread"
+        " FROM ("
+        "   SELECT match_id, MAX(id) AS last_id,"
+        "          SUM(CASE WHEN sender!=? AND read=0 THEN 1 ELSE 0 END) AS unread"
+        "   FROM messages"
+        "   WHERE visible_at<=?"
+        "     AND match_id IN (SELECT id FROM matches WHERE (a=? OR b=?) AND active=1)"
+        "   GROUP BY match_id"
+        " ) agg"
+        " JOIN messages msg ON msg.id = agg.last_id",
+        (uid, now, uid, uid),
+    ).fetchall()
+    by_mid = {r["match_id"]: r for r in agg_rows}
+    ms = []
+    for r in rows:
+        info = by_mid.get(r["_mid"])
+        ms.append({
+            "id": r["_mid"],
+            "score": r["_mscore"],
+            "created": r["_mcreated"],
+            "unread": int(info["unread"] or 0) if info else 0,
+            "user": user_row_to_dict(r, me),
+            "last": {"text": info["text"], "mine": info["sender"] == uid, "at": info["created"]} if info else None,
+        })
+    ms.sort(key=lambda m: -((m["last"] or {}).get("at") or m["created"]))
+    return ms
 
 
 def bot_say(c, match_id, bot_id, text, delay):
@@ -339,12 +531,23 @@ def create_match(c, a_id, b_id, score):
     return c.execute("SELECT * FROM matches WHERE id=?", (mid,)).fetchone(), True
 
 
+def log_impressions(c, room_ids, user_id):
+    if not room_ids:
+        return
+    now = time.time()
+    vals = ",".join("(?,?,?)" for _ in room_ids)
+    params = []
+    for rid in room_ids:
+        params.extend((rid, user_id, now))
+    c.execute(f"INSERT INTO impressions(room_id,user_id,created) VALUES {vals}", tuple(params))
+
+
 def rooms_for(c, me, other, user_id, log=True):
     avg_max = (me["budget_max"] + other["budget_max"]) / 2 if other else me["budget_max"]
     unis = {me["university"], other["university"] if other else ""}
     out = []
-    for r in c.execute("SELECT * FROM rooms").fetchall():
-        near = json.loads(r["near"])
+    for r in _get_rooms(c):
+        near = r["near"]
         per = r["price"] / 2 / 1_000_000
         fits = per <= avg_max + 0.3
         near_hit = any(u in near for u in unis if u)
@@ -352,16 +555,18 @@ def rooms_for(c, me, other, user_id, log=True):
         want = {me["house_type"], other["house_type"] if other else me["house_type"]}
         type_hit = rtype in want
         prio = {me["priority"], other["priority"] if other else me["priority"]}
-        rank = (r["sponsored"] * 1) + (2 if near_hit and "near" in prio else 1 if near_hit else 0) + (2 if type_hit else 0) + (2 if fits else -2)
+        rank = (int(r["sponsored"]) * 1) + (2 if near_hit and "near" in prio else 1 if near_hit else 0) + (2 if type_hit else 0) + (2 if fits else -2)
         out.append((rank, r, per, fits, near_hit))
     out.sort(key=lambda x: -x[0])
     res = []
+    sp_ids = []
     for rank, r, per, fits, near_hit in out[:4]:
-        d = room_dict(r)
+        d = dict(r)
         d.update({"per_person": round(per, 2), "fits": fits, "near_you": near_hit})
         res.append(d)
         if log and r["sponsored"]:
-            c.execute("INSERT INTO impressions(room_id,user_id,created) VALUES(?,?,?)", (r["id"], user_id, time.time()))
+            sp_ids.append(r["id"])
+    log_impressions(c, sp_ids, user_id)
     return res
 
 
@@ -432,10 +637,20 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s %s\n" % (self.command, self.path))
 
     # --- helpers
+    def _tok(self):
+        h = self.headers.get("Authorization", "")
+        return h[7:] if h.startswith("Bearer ") else ""
+
     def send_json(self, data, code=200):
         body = json.dumps(data, ensure_ascii=False).encode()
+        gz = len(body) > 512 and "gzip" in self.headers.get("Accept-Encoding", "").lower()
+        if gz:
+            body = gzip.compress(body, compresslevel=5)
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -453,12 +668,17 @@ class Handler(BaseHTTPRequestHandler):
             raise Err(400, "JSON không hợp lệ")
 
     def auth(self, c):
-        h = self.headers.get("Authorization", "")
-        tok = h[7:] if h.startswith("Bearer ") else ""
-        row = c.execute("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?", (tok,)).fetchone() if tok else None
+        tok = self._tok()
+        if not tok:
+            raise Err(401, "Phiên đăng nhập đã hết hạn")
+        cached = _cache_get_user(tok)
+        if cached is not None:
+            return cached
+        row = c.execute("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?", (tok,)).fetchone()
         if not row:
             raise Err(401, "Phiên đăng nhập đã hết hạn")
-        return row
+        _cache_set_user(tok, row)
+        return dict(row)
 
     def do_GET(self):
         self.route("GET")
@@ -474,12 +694,28 @@ class Handler(BaseHTTPRequestHandler):
         path, q = u.path, {k: v[0] for k, v in parse_qs(u.query).items()}
         try:
             if path.startswith("/api/"):
-                c = db()
-                try:
-                    self.send_json(self.api(c, method, path[5:].strip("/"), q))
-                    c.commit()
-                finally:
-                    c.close()
+                res = None
+                for attempt in (0, 1):
+                    c = db()
+                    try:
+                        res = self.api(c, method, path[5:].strip("/"), q)
+                        c.commit()
+                        break
+                    except Err:
+                        c.rollback()
+                        raise
+                    except Exception as e:
+                        _cache_drop_token(self._tok())
+                        if IS_PG and isinstance(e, (psycopg.OperationalError, psycopg.InterfaceError)):
+                            c.discard()
+                            if attempt == 0:
+                                continue
+                        else:
+                            c.rollback()
+                        raise
+                    finally:
+                        c.close()
+                self.send_json(res)
             elif method == "GET" and path.startswith("/photo/"):
                 self.photo(path[7:])
             elif method == "GET":
@@ -496,11 +732,20 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "Lỗi máy chủ: " + str(e)}, 500)
 
     def photo(self, pid):
-        c = db()
-        try:
-            row = c.execute("SELECT data FROM photos WHERE user_id=?", (int(pid) if pid.isdigit() else 0,)).fetchone()
-        finally:
-            c.close()
+        row = None
+        for attempt in (0, 1):
+            c = db()
+            try:
+                row = c.execute("SELECT data FROM photos WHERE user_id=?", (int(pid) if pid.isdigit() else 0,)).fetchone()
+                break
+            except Exception as e:
+                if IS_PG and isinstance(e, (psycopg.OperationalError, psycopg.InterfaceError)):
+                    c.discard()
+                    if attempt == 0:
+                        continue
+                raise
+            finally:
+                c.close()
         if not row:
             raise Err(404, "Không có ảnh")
         data = bytes(row["data"])
@@ -517,15 +762,35 @@ class Handler(BaseHTTPRequestHandler):
         fp = os.path.normpath(os.path.join(STATIC, path.lstrip("/")))
         if not fp.startswith(STATIC) or not os.path.isfile(fp):
             fp = os.path.join(STATIC, "index.html")  # SPA fallback
-        with open(fp, "rb") as f:
-            data = f.read()
-        ctype = mimetypes.guess_type(fp)[0] or "application/octet-stream"
+        mtime = os.path.getmtime(fp)
+        entry = _STATIC_CACHE.get(fp)
+        if not entry or entry[0] != mtime:
+            with open(fp, "rb") as f:
+                data = f.read()
+            gz_data = gzip.compress(data, compresslevel=6) if len(data) > 512 else data
+            etag = f'"{hashlib.md5(data).hexdigest()}"'
+            ctype = mimetypes.guess_type(fp)[0] or "application/octet-stream"
+            entry = (mtime, data, gz_data, etag, ctype)
+            _STATIC_CACHE[fp] = entry
+        _, data, gz_data, etag, ctype = entry
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            return
+        use_gz = len(data) > 512 and "gzip" in self.headers.get("Accept-Encoding", "").lower()
+        payload = gz_data if use_gz else data
         self.send_response(200)
         self.send_header("Content-Type", ctype + ("; charset=utf-8" if ctype.startswith("text") or "javascript" in ctype or "json" in ctype else ""))
-        self.send_header("Content-Length", str(len(data)))
+        if use_gz:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
+        self.send_header("ETag", etag)
+        self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        self.wfile.write(data)
+        self.wfile.write(payload)
 
     # --- API
     def api(self, c, method, path, q):
@@ -546,6 +811,8 @@ class Handler(BaseHTTPRequestHandler):
             if method == "PUT":
                 apply_profile(c, uid, self.body())
                 me = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+                _cache_drop_user(uid)
+                _cache_set_user(self._tok(), me)
                 return {"user": self.me_dict(c, me)}
         if path == "photo" and method == "POST":
             import base64
@@ -565,10 +832,13 @@ class Handler(BaseHTTPRequestHandler):
                 c.execute("DELETE FROM photos WHERE user_id=?", (uid,))
                 c.execute("UPDATE users SET photo_v=0 WHERE id=?", (uid,))
             me = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            _cache_drop_user(uid)
+            _cache_set_user(self._tok(), me)
             return {"user": self.me_dict(c, me)}
         if path == "logout" and method == "POST":
-            tok = self.headers.get("Authorization", "")[7:]
+            tok = self._tok()
             c.execute("DELETE FROM sessions WHERE token=?", (tok,))
+            _cache_drop_token(tok)
             return {"ok": True}
         if path == "discover" and method == "GET":
             return self.discover(c, me, q)
@@ -580,22 +850,17 @@ class Handler(BaseHTTPRequestHandler):
             c.execute("DELETE FROM swipes WHERE from_id=? AND kind='pass'", (uid,))
             return {"ok": True}
         if path == "matches" and method == "GET":
-            rows = c.execute("SELECT * FROM matches WHERE (a=? OR b=?) AND active=1 ORDER BY id DESC", (uid, uid)).fetchall()
-            ms = [match_public(c, m, uid) for m in rows]
-            ms.sort(key=lambda m: -((m["last"] or {}).get("at") or m["created"]))
+            ms = matches_public(c, me)
             return {"matches": ms, "unread": sum(m["unread"] for m in ms)}
         m = re.fullmatch(r"matches/(\d+)/(messages|unmatch|rooms)", path)
         if m:
             return self.match_ops(c, me, int(m.group(1)), m.group(2), method, q)
         if path == "rooms" and method == "GET":
-            rooms = [room_dict(r) for r in c.execute("SELECT * FROM rooms ORDER BY sponsored DESC, price").fetchall()]
-            for r in rooms:
-                if r["sponsored"]:
-                    c.execute("INSERT INTO impressions(room_id,user_id,created) VALUES(?,?,?)", (r["id"], uid, time.time()))
+            rooms = [dict(r) for r in _get_rooms(c)]
+            log_impressions(c, [r["id"] for r in rooms if r["sponsored"]], uid)
             return {"rooms": rooms}
         if path == "services" and method == "GET":
-            rows = c.execute("SELECT * FROM services WHERE kind=? ORDER BY promoted DESC, rating DESC", (q.get("kind", "truck"),)).fetchall()
-            return {"services": [service_dict(s) for s in rows]}
+            return {"services": [dict(s) for s in _get_services(c, q.get("kind", "truck"))]}
         if path == "orders":
             if method == "GET":
                 rows = c.execute("SELECT * FROM orders WHERE user_id=? ORDER BY id DESC", (uid,)).fetchall()
@@ -610,17 +875,23 @@ class Handler(BaseHTTPRequestHandler):
         d["pref_gender"] = me["pref_gender"]
         d["onboarded"] = bool(me["onboarded"])
         d["guest"] = me["username"].startswith("guest_")
-        d["liked_me"] = c.execute(
-            "SELECT COUNT(*) n FROM swipes s JOIN users u ON u.id=s.from_id WHERE s.to_id=? AND u.is_bot=0 AND s.kind IN('like','super')"
-            " AND s.from_id NOT IN (SELECT to_id FROM swipes WHERE from_id=?)", (me["id"], me["id"])).fetchone()["n"]
-        used_super = c.execute(
-            "SELECT COUNT(*) n FROM swipes WHERE from_id=? AND kind='super' AND created>?",
-            (me["id"], time.time() - 86400)).fetchone()["n"]
-        d["super_left"] = max(0, SUPER_DAILY - used_super)
+        uid = me["id"]
+        cutoff = time.time() - 86400
+        row = c.execute(
+            "SELECT"
+            " (SELECT COUNT(*) FROM swipes s JOIN users u ON u.id=s.from_id WHERE s.to_id=? AND u.is_bot=0 AND s.kind IN('like','super') AND s.from_id NOT IN (SELECT to_id FROM swipes WHERE from_id=?)) AS liked_me,"
+            " (SELECT COUNT(*) FROM swipes WHERE from_id=? AND kind='super' AND created>?) AS used_super,"
+            " (SELECT COUNT(*) FROM swipes WHERE from_id=?) AS swiped,"
+            " (SELECT COUNT(*) FROM matches WHERE (a=? OR b=?) AND active=1) AS matches,"
+            " (SELECT COUNT(*) FROM orders WHERE user_id=?) AS orders",
+            (uid, uid, uid, cutoff, uid, uid, uid, uid),
+        ).fetchone()
+        d["liked_me"] = int(row["liked_me"] or 0)
+        d["super_left"] = max(0, SUPER_DAILY - int(row["used_super"] or 0))
         d["counts"] = {
-            "swiped": c.execute("SELECT COUNT(*) n FROM swipes WHERE from_id=?", (me["id"],)).fetchone()["n"],
-            "matches": c.execute("SELECT COUNT(*) n FROM matches WHERE (a=? OR b=?) AND active=1", (me["id"], me["id"])).fetchone()["n"],
-            "orders": c.execute("SELECT COUNT(*) n FROM orders WHERE user_id=?", (me["id"],)).fetchone()["n"],
+            "swiped": int(row["swiped"] or 0),
+            "matches": int(row["matches"] or 0),
+            "orders": int(row["orders"] or 0),
         }
         return d
 
@@ -655,6 +926,7 @@ class Handler(BaseHTTPRequestHandler):
         tok = secrets.token_urlsafe(32)
         c.execute("INSERT INTO sessions VALUES(?,?,?)", (tok, uid, time.time()))
         me = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+        _cache_set_user(tok, me)
         return {"token": tok, "user": self.me_dict(c, me)}
 
     def discover(self, c, me, q):
@@ -662,9 +934,13 @@ class Handler(BaseHTTPRequestHandler):
         min_score = int(q.get("min", 0) or 0)
         uni = q.get("uni", "")
         rows = c.execute(
-            "SELECT * FROM users WHERE id!=? AND onboarded=1 AND id NOT IN (SELECT to_id FROM swipes WHERE from_id=?)"
-            " AND id NOT IN (SELECT CASE WHEN a=? THEN b ELSE a END FROM matches WHERE (a=? OR b=?) AND active=1)",
-            (uid, uid, uid, uid, uid)).fetchall()
+            "SELECT u.*, ls.kind AS _lk"
+            " FROM users u"
+            " LEFT JOIN swipes ls ON ls.from_id=u.id AND ls.to_id=?"
+            " WHERE u.id!=? AND u.onboarded=1"
+            "   AND u.id NOT IN (SELECT to_id FROM swipes WHERE from_id=?)"
+            "   AND u.id NOT IN (SELECT CASE WHEN a=? THEN b ELSE a END FROM matches WHERE (a=? OR b=?) AND active=1)",
+            (uid, uid, uid, uid, uid, uid)).fetchall()
         out = []
         for r in rows:
             if not gender_ok(me, r):
@@ -695,14 +971,14 @@ class Handler(BaseHTTPRequestHandler):
             if d["compat"]["score"] < min_score:
                 continue
             # người thật đã thích / siêu thích mình -> ưu tiên lên đầu (siêu thích trên cùng)
-            liked = c.execute("SELECT kind FROM swipes WHERE from_id=? AND to_id=?", (r["id"], uid)).fetchone()
-            lk = liked["kind"] if liked and liked["kind"] in ("like", "super") else ""
+            lk = r["_lk"] if r["_lk"] in ("like", "super") else ""
             d["liked_you"] = bool(lk)
             d["liked_kind"] = lk
             out.append(d)
         out.sort(key=lambda d: (0 if d["liked_kind"] == "super" else (1 if d["liked_kind"] == "like" else 2), -d["compat"]["score"]))
-        unis = sorted({r["university"] for r in c.execute("SELECT university FROM users WHERE onboarded=1").fetchall() if r["university"]})
-        areas = sorted({r["area"] for r in c.execute("SELECT area FROM users WHERE onboarded=1 AND id!=?", (uid,)).fetchall() if r["area"]})
+        meta = c.execute("SELECT id, university, area FROM users WHERE onboarded=1").fetchall()
+        unis = sorted({r["university"] for r in meta if r["university"]})
+        areas = sorted({r["area"] for r in meta if r["area"] and r["id"] != uid})
         return {"candidates": out[:40], "total": len(out), "universities": unis, "areas": areas}
 
     def swipe(self, c, me, b):
@@ -710,17 +986,21 @@ class Handler(BaseHTTPRequestHandler):
         kind = b.get("kind")
         if kind not in ("like", "pass", "super"):
             raise Err(400, "Hành động không hợp lệ")
+        if kind == "pass":
+            if to <= 0 or to == uid:
+                raise Err(404, "Không tìm thấy người dùng")
+            c.execute("INSERT INTO swipes(from_id,to_id,kind,created) VALUES(?,?,?,?) ON CONFLICT(from_id,to_id) DO UPDATE SET kind=excluded.kind, created=excluded.created", (uid, to, kind, time.time()))
+            return {"matched": False}
         other = c.execute("SELECT * FROM users WHERE id=? AND id!=?", (to, uid)).fetchone()
         if not other:
             raise Err(404, "Không tìm thấy người dùng")
+        res_extra = {}
         if kind == "super":
-            used = c.execute("SELECT COUNT(*) n FROM swipes WHERE from_id=? AND kind='super' AND created>?", (uid, time.time() - 86400)).fetchone()["n"]
+            used = int(c.execute("SELECT COUNT(*) n FROM swipes WHERE from_id=? AND kind='super' AND created>?", (uid, time.time() - 86400)).fetchone()["n"] or 0)
             if used >= SUPER_DAILY:
                 raise Err(429, f"Hôm nay bạn đã dùng hết {SUPER_DAILY} lượt Siêu thích ⭐")
+            res_extra["super_left"] = max(0, SUPER_DAILY - (used + 1))
         c.execute("INSERT INTO swipes(from_id,to_id,kind,created) VALUES(?,?,?,?) ON CONFLICT(from_id,to_id) DO UPDATE SET kind=excluded.kind, created=excluded.created", (uid, to, kind, time.time()))
-        super_left = max(0, SUPER_DAILY - c.execute("SELECT COUNT(*) n FROM swipes WHERE from_id=? AND kind='super' AND created>?", (uid, time.time() - 86400)).fetchone()["n"])
-        if kind == "pass":
-            return {"matched": False, "super_left": super_left}
         score = compat(me, other)["score"]
         mutual = False
         if other["is_bot"]:
@@ -730,13 +1010,13 @@ class Handler(BaseHTTPRequestHandler):
             mutual = bool(r and r["kind"] in ("like", "super"))
         if not mutual:
             note = ("Đã gửi Siêu thích ⭐ — hồ sơ bạn sẽ được đẩy lên đầu!" if kind == "super" else "Đã gửi lượt thích, chờ họ thích lại") if not other["is_bot"] else "Bạn ấy chưa thấy hợp lắm, thử người khác nhé"
-            return {"matched": False, "note": note, "super_left": super_left}
+            return {"matched": False, "note": note, **res_extra}
         m, created = create_match(c, uid, to, score)
         if created and other["is_bot"]:
             bot_say(c, m["id"], other["id"], bot_opening(other, score), 2.0)
-        mp = match_public(c, m, uid)
+        mp = match_public(c, m, uid, me=me, other=other, fresh=created)
         mp["rooms"] = rooms_for(c, me, other, uid)
-        return {"matched": True, "match": mp, "new": created, "super_left": super_left}
+        return {"matched": True, "match": mp, "new": created, **res_extra}
 
     def undo(self, c, me):
         row = c.execute("SELECT * FROM swipes WHERE from_id=? ORDER BY created DESC LIMIT 1", (me["id"],)).fetchone()
@@ -751,11 +1031,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def match_ops(self, c, me, mid, op, method, q):
         uid = me["id"]
-        m = c.execute("SELECT * FROM matches WHERE id=? AND (a=? OR b=?) AND active=1", (mid, uid, uid)).fetchone()
-        if not m:
+        other = c.execute(
+            "SELECT u.*, m.id AS _mid FROM matches m"
+            " JOIN users u ON u.id = CASE WHEN m.a=? THEN m.b ELSE m.a END"
+            " WHERE m.id=? AND (m.a=? OR m.b=?) AND m.active=1",
+            (uid, mid, uid, uid),
+        ).fetchone()
+        if not other:
             raise Err(404, "Không tìm thấy cuộc trò chuyện")
-        other_id = m["b"] if m["a"] == uid else m["a"]
-        other = c.execute("SELECT * FROM users WHERE id=?", (other_id,)).fetchone()
+        other_id = other["id"]
         if op == "unmatch" and method == "POST":
             c.execute("UPDATE matches SET active=0 WHERE id=?", (mid,))
             return {"ok": True}
@@ -771,11 +1055,18 @@ class Handler(BaseHTTPRequestHandler):
                 bot_say(c, mid, other_id, bot_reply(other, text, me["name"]), random.uniform(1.2, 2.8))
             return {"ok": True}
         after = int(q.get("after", 0) or 0)
-        c.execute("UPDATE messages SET read=1 WHERE match_id=? AND sender!=? AND visible_at<=?", (mid, uid, now))
-        rows = c.execute("SELECT * FROM messages WHERE match_id=? AND id>? AND visible_at<=? ORDER BY id", (mid, after, now)).fetchall()
-        typing = bool(c.execute("SELECT 1 FROM messages WHERE match_id=? AND sender=? AND visible_at>?", (mid, other_id, now)).fetchone())
-        return {"messages": [{"id": r["id"], "mine": r["sender"] == uid, "text": r["text"], "at": r["created"]} for r in rows],
-                "typing": typing, "user": user_row_to_dict(other, me)}
+        rows = c.execute(
+            "SELECT id, sender, text, created, visible_at, read"
+            " FROM messages WHERE match_id=? AND (id>? OR (sender=? AND visible_at>?))"
+            " ORDER BY id",
+            (mid, after, other_id, now),
+        ).fetchall()
+        if any(r["sender"] != uid and not r["read"] and r["visible_at"] <= now for r in rows):
+            c.execute("UPDATE messages SET read=1 WHERE match_id=? AND sender!=? AND read=0 AND visible_at<=?", (mid, uid, now))
+        msgs = [{"id": r["id"], "mine": r["sender"] == uid, "text": r["text"], "at": r["created"]}
+                for r in rows if r["id"] > after and r["visible_at"] <= now]
+        typing = any(r["sender"] == other_id and r["visible_at"] > now for r in rows)
+        return {"messages": msgs, "typing": typing, "user": user_row_to_dict(other, me)}
 
     def make_order(self, c, me, b):
         kind = b.get("kind")
@@ -799,20 +1090,30 @@ class Handler(BaseHTTPRequestHandler):
         return {"order": order_dict(o)}
 
     def stats(self, c):
-        one = lambda sql, *a: c.execute(sql, a).fetchone()["v"] or 0
-        by_kind = {r["kind"]: {"orders": r["n"], "gmv": r["g"], "commission": r["cm"]} for r in c.execute(
+        s = c.execute(
+            "SELECT"
+            " (SELECT COUNT(*) FROM users WHERE is_bot=0) AS users,"
+            " (SELECT COUNT(*) FROM matches) AS matches,"
+            " (SELECT COUNT(*) FROM messages) AS messages,"
+            " (SELECT COUNT(*) FROM swipes) AS swipes,"
+            " (SELECT COUNT(*) FROM impressions) AS impressions,"
+            " (SELECT COUNT(*) FROM orders) AS orders,"
+            " (SELECT SUM(commission) FROM orders) AS commission"
+        ).fetchone()
+        by_kind = {r["kind"]: {"orders": int(r["n"] or 0), "gmv": int(r["g"] or 0), "commission": int(r["cm"] or 0)} for r in c.execute(
             "SELECT kind, COUNT(*) n, SUM(amount) g, SUM(commission) cm FROM orders GROUP BY kind").fetchall()}
-        top_rooms = [{"name": r["name"], "views": r["n"]} for r in c.execute(
+        top_rooms = [{"name": r["name"], "views": int(r["n"] or 0)} for r in c.execute(
             "SELECT r.name, COUNT(*) n FROM impressions i JOIN rooms r ON r.id=i.room_id GROUP BY r.id, r.name ORDER BY n DESC LIMIT 3").fetchall()]
+        imps = int(s["impressions"] or 0)
         return {
-            "users": one("SELECT COUNT(*) v FROM users WHERE is_bot=0"),
-            "matches": one("SELECT COUNT(*) v FROM matches"),
-            "messages": one("SELECT COUNT(*) v FROM messages"),
-            "swipes": one("SELECT COUNT(*) v FROM swipes"),
-            "impressions": one("SELECT COUNT(*) v FROM impressions"),
-            "orders": one("SELECT COUNT(*) v FROM orders"),
-            "commission": one("SELECT SUM(commission) v FROM orders"),
-            "sponsor_revenue": one("SELECT COUNT(*) v FROM impressions") * 2000,  # giả định 2.000đ / lượt hiển thị
+            "users": int(s["users"] or 0),
+            "matches": int(s["matches"] or 0),
+            "messages": int(s["messages"] or 0),
+            "swipes": int(s["swipes"] or 0),
+            "impressions": imps,
+            "orders": int(s["orders"] or 0),
+            "commission": int(s["commission"] or 0),
+            "sponsor_revenue": imps * 2000,  # giả định 2.000đ / lượt hiển thị
             "by_kind": by_kind, "top_rooms": top_rooms,
         }
 

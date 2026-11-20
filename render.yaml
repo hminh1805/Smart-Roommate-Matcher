@@ -3,6 +3,7 @@ services:
     name: smart-roommate-matcher
     runtime: docker
     plan: free
+    region: singapore
     healthCheckPath: /api/health
     envVars:
       - key: DATABASE_URL

@@ -18,8 +18,8 @@ const PRIOS = [['cheap', '💸', 'Giá rẻ', 'Tiết kiệm nhất'], ['near', 
 const HNAME = Object.fromEntries(HOUSES.map(h => [h[0], h[2]])), PNAME = Object.fromEntries(PRIOS.map(p => [p[0], p[2]]));
 const SVC = [['room', '🏘️', 'Phòng trọ'], ['truck', '🚚', 'Xe chuyển'], ['clean', '🧽', 'Dọn dẹp'], ['used', '🛋️', 'Đồ cũ']];
 
-const S = { token: localStorage.getItem('rm_token'), user: null, tab: 'disc', deck: [], unis: [], filters: { min: 0, uni: '', area: '', house: '', prio: '', bud: '', tag: '', sleep: '', tidy: '', photo: '' }, last: null, busy: false, matches: [], unread: 0, svc: 'room', onb: null, loaded: false };
-let chatTimer = null, pollTimer = null;
+const S = { token: localStorage.getItem('rm_token'), user: null, tab: 'disc', deck: [], unis: [], filters: { min: 0, uni: '', area: '', house: '', prio: '', bud: '', tag: '', sleep: '', tidy: '', photo: '' }, last: null, busy: false, matches: [], matchesLoaded: false, unread: 0, svc: 'room', svcCache: {}, onb: null, loaded: false };
+let chatTimer = null, pollTimer = null, pollBusy = false;
 
 /* ---------- helpers ---------- */
 async function api(path, method = 'GET', body) {
@@ -77,7 +77,7 @@ async function boot() {
 }
 function logout(silent) {
   if (!silent && S.token) api('logout', 'POST').catch(() => { });
-  localStorage.removeItem('rm_token'); S.token = null; S.user = null; S.deck = []; S.loaded = false; S.matches = [];
+  localStorage.removeItem('rm_token'); S.token = null; S.user = null; S.deck = []; S.loaded = false; S.matches = []; S.matchesLoaded = false; S.svcCache = {};
   clearInterval(pollTimer); closeChat(); closeSheet(); route();
 }
 function route() {
@@ -100,14 +100,19 @@ function authScreen(mode) {
     <button class="btn" id="a_go">${reg ? 'Tạo tài khoản' : 'Đăng nhập'}</button>
     <button class="btn ghost" style="margin-top:10px" id="a_guest">⚡ Dùng thử ngay, không cần đăng ký</button>
   </div>`;
-  const go = async (kind, body) => {
+  const go = async (kind, body, btn) => {
     $('#a_err').textContent = '';
+    const goBtn = $('#a_go'), gBtn = $('#a_guest'), old = btn.textContent;
+    goBtn.disabled = true; gBtn.disabled = true; btn.textContent = 'Đang xử lý…';
     try { const d = await api(kind, 'POST', body); S.token = d.token; S.user = d.user; localStorage.setItem('rm_token', d.token); route(); }
-    catch (e) { $('#a_err') && ($('#a_err').textContent = e.message); }
+    catch (e) {
+      if ($('#a_err')) $('#a_err').textContent = e.message;
+      goBtn.disabled = false; gBtn.disabled = false; btn.textContent = old;
+    }
   };
-  $('#a_go').onclick = () => go(reg ? 'register' : 'login', { username: $('#a_user').value, password: $('#a_pw').value, name: reg ? $('#a_name').value : undefined });
+  $('#a_go').onclick = () => go(reg ? 'register' : 'login', { username: $('#a_user').value, password: $('#a_pw').value, name: reg ? $('#a_name').value : undefined }, $('#a_go'));
   $('#a_pw').onkeydown = e => { if (e.key === 'Enter') $('#a_go').click(); };
-  $('#a_guest').onclick = () => go('guest', {});
+  $('#a_guest').onclick = () => go('guest', {}, $('#a_guest'));
 }
 
 /* ---------- onboarding ---------- */
@@ -155,9 +160,20 @@ function onboarding(first, step = 0) {
       try { const d = await api('photo', 'POST', { data: await pickPhoto(f) }); S.user.photo = d.user.photo; toast('Đã cập nhật ảnh đại diện 📷'); onboarding(first, 0); } catch (er) { toast(er.message); }
     };
     if ($('#pu_del')) $('#pu_del').onclick = async () => { scrape(); const d = await api('photo', 'POST', { data: '' }); S.user.photo = d.user.photo; onboarding(first, 0); };
-    document.querySelectorAll('[data-e]').forEach(b => b.onclick = () => { scrape(); o.emoji = b.dataset.e; onboarding(first, 0); });
-    document.querySelectorAll('[data-c]').forEach(b => b.onclick = () => { scrape(); o.color = +b.dataset.c; onboarding(first, 0); });
-    document.querySelectorAll('#o_pref button').forEach(b => b.onclick = () => { scrape(); o.pref_gender = b.dataset.p; onboarding(first, 0); });
+    document.querySelectorAll('[data-e]').forEach(b => b.onclick = () => {
+      o.emoji = b.dataset.e;
+      document.querySelectorAll('[data-e]').forEach(x => x.classList.toggle('sel', x === b));
+      $('#pu_av').innerHTML = av({ emoji: o.emoji, color: o.color, photo: S.user.photo }, 92);
+    });
+    document.querySelectorAll('[data-c]').forEach(b => b.onclick = () => {
+      o.color = +b.dataset.c;
+      document.querySelectorAll('[data-c]').forEach(x => x.classList.toggle('sel', x === b));
+      $('#pu_av').innerHTML = av({ emoji: o.emoji, color: o.color, photo: S.user.photo }, 92);
+    });
+    document.querySelectorAll('#o_pref button').forEach(b => b.onclick = () => {
+      o.pref_gender = b.dataset.p;
+      document.querySelectorAll('#o_pref button').forEach(x => x.classList.toggle('on', x === b));
+    });
   }
   if (step === 1) document.querySelectorAll('[data-h]').forEach(r => r.oninput = () => { o[r.dataset.h] = +r.value; $('#hv_' + r.dataset.h).textContent = r.value + '/5'; });
   if (step === 2) {
@@ -173,10 +189,12 @@ function onboarding(first, step = 0) {
     scrape();
     if (step === 0 && !o.name) return $('#o_err').textContent = 'Vui lòng nhập tên của bạn';
     if (step < 2) return onboarding(first, step + 1);
+    const btn = $('#o_next'), old = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Đang lưu…';
     try {
       const d = await api('me', 'PUT', o); S.user = d.user; S.onb = null; S.deck = []; S.loaded = false;
       toast(first ? 'Hồ sơ đã sẵn sàng! Bắt đầu quẹt thôi 🎉' : 'Đã lưu hồ sơ'); shell(S.user.onboarded && !first ? 'me' : 'disc');
-    } catch (e) { $('#o_err').textContent = e.message; }
+    } catch (e) { $('#o_err').textContent = e.message; btn.disabled = false; btn.textContent = old; }
   };
 }
 
@@ -185,15 +203,27 @@ function shell(tab) {
   if (tab) S.tab = tab;
   $('#screen').innerHTML = `<div id="main" style="flex:1;display:flex;flex-direction:column;min-height:0"></div>
   <nav class="tabbar">${[['disc', 'Khám phá'], ['mat', 'Tin nhắn'], ['svc', 'Dịch vụ'], ['me', 'Hồ sơ']].map(([k, l]) => `<button data-t="${k}" class="${S.tab === k ? 'on' : ''}">${ICONS[k]}${l}<span class="bdg" id="bdg_${k}" style="display:none"></span></button>`).join('')}</nav>`;
-  document.querySelectorAll('.tabbar button').forEach(b => b.onclick = () => { S.tab = b.dataset.t; shell(); });
+  document.querySelectorAll('.tabbar button').forEach(b => b.onclick = () => switchTab(b.dataset.t));
   renderTab(); refreshUnread();
-  clearInterval(pollTimer); pollTimer = setInterval(() => { refreshUnread(); if (S.tab === 'mat' && !$('.page')) loadMatches(true); }, 5000);
+  clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    if (document.hidden || pollBusy) return;
+    pollBusy = true;
+    try { await refreshUnread(); } finally { pollBusy = false; }
+  }, 10000);
+}
+function switchTab(tab) {
+  if (tab === S.tab && $('#main')?.children.length) return;
+  S.tab = tab;
+  document.querySelectorAll('.tabbar button').forEach(b => b.classList.toggle('on', b.dataset.t === tab));
+  renderTab();
 }
 function renderTab() { ({ disc: renderDisc, mat: renderMatches, svc: renderSvc, me: renderMe })[S.tab](); }
 async function refreshUnread() {
   try {
-    const d = await api('matches'); S.matches = d.matches; S.unread = d.unread;
+    const d = await api('matches'); S.matches = d.matches; S.unread = d.unread; S.matchesLoaded = true;
     const b = $('#bdg_mat'); if (b) { b.style.display = d.unread ? 'grid' : 'none'; b.textContent = d.unread; }
+    if (S.tab === 'mat' && !$('.page')) drawMatches();
   } catch (e) { }
 }
 
@@ -201,6 +231,7 @@ async function refreshUnread() {
 async function loadDeck() {
   const q = filterQuery();
   const d = await api('discover?' + q); S.deck = d.candidates; S.unis = d.universities; S.areas = d.areas; S.loaded = true;
+  d.candidates.slice(0, 4).forEach(u => { if (u.photo) { const im = new Image(); im.src = u.photo; } });
 }
 async function renderDisc() {
   $('#main').innerHTML = `<div class="topbar"><div class="logo">🏠 Smart Roommate</div><div class="row" style="gap:8px"><button class="filter-btn" onclick="openFilters()">${FUNNEL}Bộ lọc${filterActive() ? `<span class="fb">${filterActive()}</span>` : ''}</button></div></div>
@@ -249,18 +280,24 @@ function syncActs() {
   if (sc) sc.textContent = sl;
 }
 function bindDrag(el) {
-  let sx, sy, dx = 0, dy = 0, on = false, moved = 0;
+  let sx, sy, dx = 0, dy = 0, on = false, moved = 0, raf = 0;
   const st = { like: el.querySelector('.stamp.like'), nope: el.querySelector('.stamp.nope'), sup: el.querySelector('.stamp.super') };
   el.onpointerdown = e => { on = true; moved = 0; dx = 0; dy = 0; sx = e.clientX; sy = e.clientY; el.style.transition = 'none'; el.setPointerCapture(e.pointerId); };
   el.onpointermove = e => {
     if (!on) return; dx = e.clientX - sx; dy = e.clientY - sy; moved = Math.max(moved, Math.abs(dx) + Math.abs(dy));
-    el.style.transform = `translate(${dx}px,${dy}px) rotate(${dx / 16}deg)`;
-    const up = dy < -40 && Math.abs(dx) < 80;
-    st.like.style.opacity = up ? 0 : Math.min(1, dx / 90); st.nope.style.opacity = up ? 0 : Math.min(1, -dx / 90); st.sup.style.opacity = up ? Math.min(1, -dy / 90) : 0;
-    const nx = el.previousElementSibling; if (nx) { const p = Math.min(1, Math.hypot(dx, dy) / 150); nx.style.transition = 'none'; nx.style.transform = `scale(${.95 + .05 * p}) translateY(${10 - 10 * p}px)`; }
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      if (!on) return;
+      el.style.transform = `translate(${dx}px,${dy}px) rotate(${dx / 16}deg)`;
+      const up = dy < -40 && Math.abs(dx) < 80;
+      st.like.style.opacity = up ? 0 : Math.min(1, dx / 90); st.nope.style.opacity = up ? 0 : Math.min(1, -dx / 90); st.sup.style.opacity = up ? Math.min(1, -dy / 90) : 0;
+      const nx = el.previousElementSibling; if (nx) { const p = Math.min(1, Math.hypot(dx, dy) / 150); nx.style.transition = 'none'; nx.style.transform = `scale(${.95 + .05 * p}) translateY(${10 - 10 * p}px)`; }
+    });
   };
   el.onpointerup = () => {
     if (!on) return; on = false;
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
     if (moved < 6) { el.style.transition = ''; return openDetail(S.deck[0]); }
     if (dx > 100) return fly('like', dx, dy); if (dx < -100) return fly('pass', dx, dy); if (dy < -110) return fly('super', dx, dy);
     el.style.transition = 'transform .28s cubic-bezier(.2,1.4,.4,1)'; el.style.transform = ''; Object.values(st).forEach(s => s.style.opacity = 0);
@@ -276,6 +313,7 @@ function fly(kind, dx, dy) {
     return toast('Hôm nay bạn đã dùng hết 3 lượt Siêu thích ⭐');
   }
   const u = S.deck.shift(); S.last = u;
+  if (S.user?.counts) S.user.counts.swiped++;
   if (kind === 'super' && S.user) { S.user.super_left = Math.max(0, (S.user.super_left ?? 3) - 1); syncActs(); }
   el.classList.add('flying'); el.style.pointerEvents = 'none';
   const tx = kind === 'like' ? 520 : kind === 'pass' ? -520 : dx * 2, ty = kind === 'super' ? -700 : dy + 60;
@@ -288,7 +326,7 @@ function fly(kind, dx, dy) {
   const next = el.previousElementSibling;
   if (next && !next.classList.contains('flying')) {
     next.classList.remove('s1', 's2');
-    next.style.transition = 'transform .25s cubic-bezier(.2,.9,.3,1), filter .25s';
+    next.style.transition = 'transform .25s cubic-bezier(.2,.9,.3,1), opacity .25s';
     next.style.transform = '';
     bindDrag(next);
     const third = next.previousElementSibling;
@@ -383,17 +421,24 @@ function showMatch(m) {
 }
 
 /* ---------- matches & chat ---------- */
+function drawMatches() {
+  const el = $('#mlist'); if (!el) return;
+  const ms = S.matches;
+  if (!ms.length) { el.innerHTML = `<div class="empty"><div class="em">💌</div><h2 class="t">Chưa có match nào</h2><p class="mu">Sang tab Khám phá và thả tim vài bạn. Bạn nào hợp thói quen sẽ match ngay!</p><br><button class="btn" onclick="switchTab('disc')">Đi quẹt thôi</button></div>`; return; }
+  el.innerHTML = `<h3 class="t" style="margin-top:4px">Match mới</h3><div class="nm">${ms.map(m => `<button onclick="openChat(${m.id})">${av(m.user, 62)}${esc(m.user.name.split(' ').pop())}</button>`).join('')}</div>
+  <h3 class="t" style="margin-top:4px">Cuộc trò chuyện</h3>${ms.map(m => `<div class="conv ${m.unread ? 'unread' : ''}" onclick="openChat(${m.id})">${av(m.user, 54)}<div class="grow" style="flex:1;min-width:0"><b>${esc(m.user.name)}</b> <span class="chip ok" style="margin:0 0 0 4px">${m.score}%</span><div class="lm">${m.last ? (m.last.mine ? 'Bạn: ' : '') + esc(m.last.text) : 'Nói xin chào đi nào 👋'}</div></div>${m.unread ? `<div class="ub">${m.unread}</div>` : ''}</div>`).join('')}`;
+}
 async function renderMatches() {
-  $('#main').innerHTML = `<div class="topbar"><div class="logo">Tin nhắn</div></div><div class="view" id="mlist"><div class="spin"></div></div>`;
+  $('#main').innerHTML = `<div class="topbar"><div class="logo">Tin nhắn</div></div><div class="view" id="mlist">${S.matchesLoaded ? '' : '<div class="spin"></div>'}</div>`;
+  if (S.matchesLoaded) drawMatches();
   loadMatches();
 }
 async function loadMatches() {
-  try { const d = await api('matches'); S.matches = d.matches; S.unread = d.unread; } catch (e) { return; }
-  const el = $('#mlist'); if (!el) return;
-  const ms = S.matches;
-  if (!ms.length) { el.innerHTML = `<div class="empty"><div class="em">💌</div><h2 class="t">Chưa có match nào</h2><p class="mu">Sang tab Khám phá và thả tim vài bạn. Bạn nào hợp thói quen sẽ match ngay!</p><br><button class="btn" onclick="S.tab='disc';shell()">Đi quẹt thôi</button></div>`; return; }
-  el.innerHTML = `<h3 class="t" style="margin-top:4px">Match mới</h3><div class="nm">${ms.map(m => `<button onclick="openChat(${m.id})">${av(m.user, 62)}${esc(m.user.name.split(' ').pop())}</button>`).join('')}</div>
-  <h3 class="t" style="margin-top:4px">Cuộc trò chuyện</h3>${ms.map(m => `<div class="conv ${m.unread ? 'unread' : ''}" onclick="openChat(${m.id})">${av(m.user, 54)}<div class="grow" style="flex:1;min-width:0"><b>${esc(m.user.name)}</b> <span class="chip ok" style="margin:0 0 0 4px">${m.score}%</span><div class="lm">${m.last ? (m.last.mine ? 'Bạn: ' : '') + esc(m.last.text) : 'Nói xin chào đi nào 👋'}</div></div>${m.unread ? `<div class="ub">${m.unread}</div>` : ''}</div>`).join('')}`;
+  try {
+    const d = await api('matches'); S.matches = d.matches; S.unread = d.unread; S.matchesLoaded = true;
+    const b = $('#bdg_mat'); if (b) { b.style.display = d.unread ? 'grid' : 'none'; b.textContent = d.unread; }
+    if (S.tab === 'mat') drawMatches();
+  } catch (e) { }
 }
 async function openChat(id) {
   closeChat();
@@ -403,28 +448,55 @@ async function openChat(id) {
   <div class="msgs" id="msgs"></div><div class="ice" id="ice">${ICEBREAK.map(t => `<button>${t}</button>`).join('')}</div>
   <div class="composer"><input class="input" id="c_in" placeholder="Nhập tin nhắn…" maxlength="1000" autocomplete="off"><button class="send" id="c_send">➤</button></div>`;
   $('#overlay').appendChild(page);
-  let last = 0, sending = false;
+  let last = 0, chatBusy = false, chatPromise = null;
   const msgs = $('#msgs');
-  const poll = async () => {
+  const poll = async (force = false) => {
     if (!$('#msgs')) return;
-    try {
-      const d = await api(`matches/${id}/messages?after=${last}`);
-      const wasBottom = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80;
-      msgs.querySelector('.typing')?.remove();
-      d.messages.forEach(m => { last = Math.max(last, m.id); const e = document.createElement('div'); e.className = 'msg' + (m.mine ? ' me' : ''); e.innerHTML = `${esc(m.text)}<time>${timeStr(m.at)}</time>`; msgs.appendChild(e); });
-      if (d.messages.length) $('#ice') && d.messages.some(m => m.mine) && $('#ice').remove();
-      if (d.typing) { msgs.insertAdjacentHTML('beforeend', '<div class="typing"><i></i><i></i><i></i></div>'); $('#c_sub').textContent = 'đang nhập…'; } else $('#c_sub').textContent = mt.user.university;
-      if (d.messages.length || d.typing) if (wasBottom || last <= d.messages[0]?.id) msgs.scrollTop = msgs.scrollHeight;
-    } catch (e) { }
+    if (!force && document.hidden) return;
+    if (chatBusy) {
+      if (!force) return;
+      await chatPromise;
+      if (!$('#msgs')) return;
+    }
+    chatBusy = true;
+    chatPromise = (async () => {
+      try {
+        const d = await api(`matches/${id}/messages?after=${last}`);
+        if (!$('#msgs')) return;
+        const wasBottom = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80;
+        msgs.querySelector('.typing')?.remove();
+        if (d.messages.length) msgs.querySelectorAll('.msg.pending.sent').forEach(x => x.remove());
+        d.messages.forEach(m => { last = Math.max(last, m.id); const e = document.createElement('div'); e.className = 'msg' + (m.mine ? ' me' : ''); e.innerHTML = `${esc(m.text)}<time>${timeStr(m.at)}</time>`; msgs.appendChild(e); });
+        if (d.messages.length) $('#ice') && d.messages.some(m => m.mine) && $('#ice').remove();
+        if (d.typing) { msgs.insertAdjacentHTML('beforeend', '<div class="typing"><i></i><i></i><i></i></div>'); $('#c_sub').textContent = 'đang nhập…'; } else $('#c_sub').textContent = mt.user.university;
+        if (d.messages.length || d.typing) if (wasBottom || last <= d.messages[0]?.id) msgs.scrollTop = msgs.scrollHeight;
+      } catch (e) { }
+    })();
+    try { await chatPromise; } finally { chatBusy = false; chatPromise = null; }
   };
   const send = async (text) => {
-    text = (text || $('#c_in').value).trim(); if (!text || sending) return; sending = true; $('#c_in').value = '';
-    try { await api(`matches/${id}/messages`, 'POST', { text }); await poll(); msgs.scrollTop = msgs.scrollHeight; } catch (e) { toast(e.message); }
-    sending = false;
+    text = (text || $('#c_in').value).trim(); if (!text) return;
+    $('#c_in').value = '';
+    $('#ice')?.remove();
+    const pend = document.createElement('div');
+    pend.className = 'msg me pending';
+    pend.innerHTML = `${esc(text)}<time>Đang gửi…</time>`;
+    msgs.appendChild(pend);
+    msgs.scrollTop = msgs.scrollHeight;
+    try {
+      await api(`matches/${id}/messages`, 'POST', { text });
+      pend.classList.add('sent');
+      await poll(true);
+      msgs.scrollTop = msgs.scrollHeight;
+      setTimeout(() => poll(), 1600);
+    } catch (e) {
+      pend.remove();
+      toast(e.message);
+    }
   };
   $('#c_send').onclick = () => send(); $('#c_in').onkeydown = e => { if (e.key === 'Enter') send(); };
   $('#ice').querySelectorAll('button').forEach(b => b.onclick = () => { send(b.textContent); });
-  $('#c_back').onclick = () => { closeChat(); refreshUnread(); if (S.tab === 'mat') loadMatches(); };
+  $('#c_back').onclick = () => { closeChat(); refreshUnread(); if (S.tab === 'mat') drawMatches(); };
   $('#c_more').onclick = () => openSheet(`<h2 class="t">${esc(mt.user.name)}</h2>
     <button class="btn" onclick="closeSheet();showRoomsFor(${id})">🏘️ Xem phòng gợi ý cho 2 bạn</button>
     <button class="btn ghost" style="margin-top:10px" onclick="closeSheet();openDetail(S.matches.find(m=>m.id==${id}).user)">👤 Xem độ hợp chi tiết</button>
@@ -432,14 +504,18 @@ async function openChat(id) {
   setTimeout(() => { const u = $('#unm'); if (u) u.onclick = async () => { if (!confirm('Hủy match với ' + mt.user.name + '?')) return; await api(`matches/${id}/unmatch`, 'POST'); closeSheet(); closeChat(); S.loaded = false; loadMatches(); refreshUnread(); }; }, 0);
   const obs = new MutationObserver(() => { const u = $('#unm'); if (u && !u.onclick) u.onclick = async () => { if (!confirm('Hủy match với ' + mt.user.name + '?')) return; await api(`matches/${id}/unmatch`, 'POST'); closeSheet(); closeChat(); loadMatches(); refreshUnread(); }; });
   obs.observe($('#sheet'), { childList: true });
-  await poll(); msgs.scrollTop = msgs.scrollHeight;
-  chatTimer = setInterval(poll, 1800);
+  await poll(true); msgs.scrollTop = msgs.scrollHeight;
+  chatTimer = setInterval(() => poll(), 2500);
 }
 function closeChat() { clearInterval(chatTimer); const p = $('#chatpage'); if (p) p.remove(); }
 async function showRoomsFor(id) {
-  const d = await api(`matches/${id}/rooms`);
-  openSheet(`<h2 class="t">Phòng gợi ý cho 2 bạn</h2><p class="mu" style="margin-bottom:10px">Xếp theo ngân sách chung và khoảng cách tới trường.</p>${d.rooms.map(r => roomCard(r)).join('')}`);
-  bindBook(d.rooms);
+  openSheet(`<h2 class="t">Phòng gợi ý cho 2 bạn</h2><div class="spin"></div>`);
+  try {
+    const d = await api(`matches/${id}/rooms`);
+    if (!$('#sheet-wrap').classList.contains('show')) return;
+    $('#sheet').innerHTML = `<div class="grab"></div><h2 class="t">Phòng gợi ý cho 2 bạn</h2><p class="mu" style="margin-bottom:10px">Xếp theo ngân sách chung và khoảng cách tới trường.</p>${d.rooms.map(r => roomCard(r)).join('')}`;
+    bindBook(d.rooms);
+  } catch (e) { closeSheet(); toast(e.message); }
 }
 
 /* ---------- services ---------- */
@@ -460,9 +536,18 @@ async function renderSvc() {
   $('#main').innerHTML = `<div class="topbar"><div class="logo">Hệ sinh thái</div></div><div class="view"><p class="mu" style="margin-bottom:10px">Mọi thứ cho một lần chuyển nhà trọn gói.</p>
   <div class="seg">${SVC.map(([k, ic, l]) => `<button class="${S.svc === k ? 'on' : ''}" data-s="${k}">${ic} ${l}</button>`).join('')}</div><div id="slist" style="margin-top:14px"><div class="spin"></div></div></div>`;
   document.querySelectorAll('[data-s]').forEach(b => b.onclick = () => { S.svc = b.dataset.s; renderSvc(); });
+  const drawSvc = (kind, items) => {
+    if (S.tab !== 'svc' || S.svc !== kind || !$('#slist')) return;
+    if (kind === 'room') { $('#slist').innerHTML = items.map(roomCard).join(''); bindBook(items); }
+    else { $('#slist').innerHTML = items.map(svcCard).join(''); bindBook(items, kind); }
+  };
+  const kind = S.svc;
+  if (S.svcCache[kind]) return drawSvc(kind, S.svcCache[kind]);
   try {
-    if (S.svc === 'room') { const d = await api('rooms'); $('#slist').innerHTML = d.rooms.map(roomCard).join(''); bindBook(d.rooms); }
-    else { const d = await api('services?kind=' + S.svc); $('#slist').innerHTML = d.services.map(svcCard).join(''); bindBook(d.services, S.svc); }
+    const d = kind === 'room' ? await api('rooms') : await api('services?kind=' + kind);
+    const items = kind === 'room' ? d.rooms : d.services;
+    S.svcCache[kind] = items;
+    drawSvc(kind, items);
   } catch (e) { toast(e.message); }
 }
 function bookSheet(kind, it) {
@@ -489,9 +574,8 @@ function radar(h) {
   const labels = HAB.map((x, i) => { const [px, py] = pt(i, 6.3); return `<text x="${px}" y="${py + 4}" text-anchor="middle" font-size="15">${x.ic}</text>`; }).join('');
   return `<svg viewBox="0 0 220 200" style="width:100%;max-width:260px;display:block;margin:auto">${grid}<polygon points="${poly}" fill="rgba(242,96,58,.25)" stroke="var(--coral)" stroke-width="2.5" stroke-linejoin="round"/>${HAB.map((x, i) => { const [px, py] = pt(i, h[x.k]); return `<circle cx="${px}" cy="${py}" r="4" fill="var(--coral)"/>`; }).join('')}${labels}</svg>`;
 }
-async function renderMe() {
-  try { S.user = (await api('me')).user; } catch (e) { }
-  const u = S.user;
+function drawMe() {
+  const u = S.user; if (!u || S.tab !== 'me') return;
   $('#main').innerHTML = `<div class="view" style="padding-top:14px">
   <div class="phero c${u.color}">${avBig(u, 96)}<h2>${esc(u.name)}, ${u.age}</h2><div style="font-size:13px;opacity:.9">🎓 ${esc(u.university || 'Chưa chọn trường')} · 📍 ${esc(u.area || '—')}</div>
   ${u.guest ? '<div style="margin-top:8px;font-size:12px;background:rgba(0,0,0,.2);border-radius:10px;padding:6px 10px;display:inline-block">Tài khoản dùng thử</div>' : ''}</div>
@@ -502,20 +586,35 @@ async function renderMe() {
   <button class="btn ghost" style="margin-top:10px" onclick="openPartner()">📊 Bảng điều khiển đối tác (B2B)</button>
   <button class="btn ghost" style="margin-top:10px;color:var(--bad)" onclick="logout()">Đăng xuất</button><div style="height:10px"></div></div>`;
 }
+async function renderMe() {
+  drawMe();
+  try {
+    const d = await api('me'); S.user = d.user;
+    if (S.tab === 'me') drawMe();
+  } catch (e) { }
+}
 async function openOrders() {
-  const d = await api('orders');
-  openSheet(`<h2 class="t">Đơn của tôi</h2>${d.orders.length ? d.orders.map(o => `<div class="ordr"><div><b>${esc(o.name)}</b><div class="mu">📅 ${esc(o.date || '—')} · ${esc(o.status)}${o.note ? '<br>“' + esc(o.note) + '”' : ''}</div></div><div class="price" style="font-size:14px;white-space:nowrap">${fmt(o.amount)}</div></div>`).join('') : '<p class="mu" style="padding:20px 0">Bạn chưa đặt dịch vụ nào. Qua tab Dịch vụ để đặt xe, dọn phòng hoặc xem trọ nhé.</p>'}`);
+  openSheet(`<h2 class="t">Đơn của tôi</h2><div class="spin"></div>`);
+  try {
+    const d = await api('orders');
+    if (!$('#sheet-wrap').classList.contains('show')) return;
+    $('#sheet').innerHTML = `<div class="grab"></div><h2 class="t">Đơn của tôi</h2>${d.orders.length ? d.orders.map(o => `<div class="ordr"><div><b>${esc(o.name)}</b><div class="mu">📅 ${esc(o.date || '—')} · ${esc(o.status)}${o.note ? '<br>“' + esc(o.note) + '”' : ''}</div></div><div class="price" style="font-size:14px;white-space:nowrap">${fmt(o.amount)}</div></div>`).join('') : '<p class="mu" style="padding:20px 0">Bạn chưa đặt dịch vụ nào. Qua tab Dịch vụ để đặt xe, dọn phòng hoặc xem trọ nhé.</p>'}`;
+  } catch (e) { closeSheet(); toast(e.message); }
 }
 async function openPartner() {
-  const s = await api('stats');
-  const kinds = { room: 'Xem phòng', truck: 'Xe chuyển', clean: 'Dọn dẹp', used: 'Đồ cũ' };
-  const mx = Math.max(1, ...Object.values(s.by_kind).map(k => k.commission));
-  openSheet(`<h2 class="t">Bảng điều khiển đối tác</h2><p class="mu">Số liệu thật từ toàn bộ người dùng, minh họa mô hình doanh thu B2B của nền tảng.</p>
-  <div class="kpi"><div class="stat"><b>${s.users}</b><span>Người dùng</span></div><div class="stat"><b>${s.matches}</b><span>Cặp match</span></div>
-  <div class="stat"><b>${s.impressions}</b><span>Lượt hiển thị phòng tài trợ</span></div><div class="stat"><b>${s.orders}</b><span>Đơn dịch vụ / xem phòng</span></div>
-  <div class="stat"><b style="font-size:17px">${fmt(s.sponsor_revenue)}</b><span>Phí quảng cáo chủ trọ (2.000đ/lượt)</span></div><div class="stat"><b style="font-size:17px">${fmt(s.commission)}</b><span>Hoa hồng (10–15%)</span></div></div>
-  <h3 class="t">Hoa hồng theo dịch vụ</h3><div class="bars">${Object.entries(kinds).map(([k, l]) => { const v = (s.by_kind[k] || { commission: 0, orders: 0 }); return `<div class="br"><span>${l}</span><div><i style="width:${v.commission / mx * 100}%"></i></div><b>${fmt(v.commission)}</b></div>`; }).join('')}</div>
-  <h3 class="t">Phòng được xem nhiều nhất</h3>${s.top_rooms.map(r => `<div class="ordr"><span>${esc(r.name)}</span><b>${r.views} lượt</b></div>`).join('') || '<p class="mu">Chưa có dữ liệu.</p>'}
-  <h3 class="t">Doanh thu ước tính</h3><div class="card" style="text-align:center"><div class="price" style="font-size:28px">${fmt(s.sponsor_revenue + s.commission)}</div><div class="mu">Phí hiển thị + hoa hồng</div></div>`);
+  openSheet(`<h2 class="t">Bảng điều khiển đối tác</h2><div class="spin"></div>`);
+  try {
+    const s = await api('stats');
+    if (!$('#sheet-wrap').classList.contains('show')) return;
+    const kinds = { room: 'Xem phòng', truck: 'Xe chuyển', clean: 'Dọn dẹp', used: 'Đồ cũ' };
+    const mx = Math.max(1, ...Object.values(s.by_kind).map(k => k.commission));
+    $('#sheet').innerHTML = `<div class="grab"></div><h2 class="t">Bảng điều khiển đối tác</h2><p class="mu">Số liệu thật từ toàn bộ người dùng, minh họa mô hình doanh thu B2B của nền tảng.</p>
+    <div class="kpi"><div class="stat"><b>${s.users}</b><span>Người dùng</span></div><div class="stat"><b>${s.matches}</b><span>Cặp match</span></div>
+    <div class="stat"><b>${s.impressions}</b><span>Lượt hiển thị phòng tài trợ</span></div><div class="stat"><b>${s.orders}</b><span>Đơn dịch vụ / xem phòng</span></div>
+    <div class="stat"><b style="font-size:17px">${fmt(s.sponsor_revenue)}</b><span>Phí quảng cáo chủ trọ (2.000đ/lượt)</span></div><div class="stat"><b style="font-size:17px">${fmt(s.commission)}</b><span>Hoa hồng (10–15%)</span></div></div>
+    <h3 class="t">Hoa hồng theo dịch vụ</h3><div class="bars">${Object.entries(kinds).map(([k, l]) => { const v = (s.by_kind[k] || { commission: 0, orders: 0 }); return `<div class="br"><span>${l}</span><div><i style="width:${v.commission / mx * 100}%"></i></div><b>${fmt(v.commission)}</b></div>`; }).join('')}</div>
+    <h3 class="t">Phòng được xem nhiều nhất</h3>${s.top_rooms.map(r => `<div class="ordr"><span>${esc(r.name)}</span><b>${r.views} lượt</b></div>`).join('') || '<p class="mu">Chưa có dữ liệu.</p>'}
+    <h3 class="t">Doanh thu ước tính</h3><div class="card" style="text-align:center"><div class="price" style="font-size:28px">${fmt(s.sponsor_revenue + s.commission)}</div><div class="mu">Phí hiển thị + hoa hồng</div></div>`;
+  } catch (e) { closeSheet(); toast(e.message); }
 }
 boot();

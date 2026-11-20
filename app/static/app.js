@@ -1,4 +1,4 @@
-/* Chung Nhà – Smart Roommate Matcher (frontend, vanilla JS) */
+/* Smart Roommate Matcher (frontend, vanilla JS) */
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = n => Number(n).toLocaleString('vi-VN') + 'đ';
@@ -203,7 +203,7 @@ async function loadDeck() {
   const d = await api('discover?' + q); S.deck = d.candidates; S.unis = d.universities; S.areas = d.areas; S.loaded = true;
 }
 async function renderDisc() {
-  $('#main').innerHTML = `<div class="topbar"><div class="logo">🏠 Chung Nhà</div><div class="row" style="gap:8px"><button class="filter-btn" onclick="openFilters()">${FUNNEL}Bộ lọc${filterActive() ? `<span class="fb">${filterActive()}</span>` : ''}</button></div></div>
+  $('#main').innerHTML = `<div class="topbar"><div class="logo">🏠 Smart Roommate</div><div class="row" style="gap:8px"><button class="filter-btn" onclick="openFilters()">${FUNNEL}Bộ lọc${filterActive() ? `<span class="fb">${filterActive()}</span>` : ''}</button></div></div>
   <div class="dwrap"><div class="deck" id="deck"><div class="spin"></div></div><div class="acts" id="acts"></div></div>`;
   if (!S.loaded) { try { await loadDeck(); } catch (e) { return toast(e.message); } }
   drawDeck();

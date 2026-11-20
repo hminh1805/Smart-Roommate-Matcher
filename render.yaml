@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: chung-nha
+    name: smart-roommate-matcher
     runtime: docker
     plan: free
     healthCheckPath: /api/health

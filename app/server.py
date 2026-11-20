@@ -641,9 +641,9 @@ class Handler(BaseHTTPRequestHandler):
         h = self.headers.get("Authorization", "")
         return h[7:] if h.startswith("Bearer ") else ""
 
-    def send_json(self, data, code=200):
+    def send_json(self, data, code=200, head_only=False):
         body = json.dumps(data, ensure_ascii=False).encode()
-        gz = len(body) > 512 and "gzip" in self.headers.get("Accept-Encoding", "").lower()
+        gz = (not head_only) and len(body) > 512 and "gzip" in self.headers.get("Accept-Encoding", "").lower()
         if gz:
             body = gzip.compress(body, compresslevel=5)
         self.send_response(code)
@@ -654,7 +654,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        if not head_only:
+            self.wfile.write(body)
 
     def body(self):
         n = int(self.headers.get("Content-Length") or 0)
@@ -683,6 +684,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.route("GET")
 
+    def do_HEAD(self):
+        self.route("HEAD")
+
     def do_POST(self):
         self.route("POST")
 
@@ -693,6 +697,9 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         path, q = u.path, {k: v[0] for k, v in parse_qs(u.query).items()}
         try:
+            if path == "/api/health" and method in ("GET", "HEAD"):
+                self.send_json({"ok": True}, head_only=(method == "HEAD"))
+                return
             if path.startswith("/api/"):
                 res = None
                 for attempt in (0, 1):
@@ -715,15 +722,15 @@ class Handler(BaseHTTPRequestHandler):
                         raise
                     finally:
                         c.close()
-                self.send_json(res)
+                self.send_json(res, head_only=(method == "HEAD"))
             elif method == "GET" and path.startswith("/photo/"):
                 self.photo(path[7:])
-            elif method == "GET":
-                self.static(path)
+            elif method in ("GET", "HEAD"):
+                self.static(path, head_only=(method == "HEAD"))
             else:
                 raise Err(405, "Method not allowed")
         except Err as e:
-            self.send_json({"error": e.msg}, e.code)
+            self.send_json({"error": e.msg}, e.code, head_only=(method == "HEAD"))
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:  # noqa
@@ -756,7 +763,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def static(self, path):
+    def static(self, path, head_only=False):
         if path in ("", "/"):
             path = "/index.html"
         fp = os.path.normpath(os.path.join(STATIC, path.lstrip("/")))
@@ -779,7 +786,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             return
-        use_gz = len(data) > 512 and "gzip" in self.headers.get("Accept-Encoding", "").lower()
+        use_gz = (not head_only) and len(data) > 512 and "gzip" in self.headers.get("Accept-Encoding", "").lower()
         payload = gz_data if use_gz else data
         self.send_response(200)
         self.send_header("Content-Type", ctype + ("; charset=utf-8" if ctype.startswith("text") or "javascript" in ctype or "json" in ctype else ""))
@@ -790,7 +797,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        self.wfile.write(payload)
+        if not head_only:
+            self.wfile.write(payload)
 
     # --- API
     def api(self, c, method, path, q):

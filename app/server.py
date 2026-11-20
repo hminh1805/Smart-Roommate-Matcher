@@ -18,9 +18,15 @@ from urllib.parse import parse_qs, urlparse
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, "static")
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+IS_PG = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE, "data", "app.db"))
 PORT = int(os.environ.get("PORT", "8000"))
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+if not IS_PG:
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+if IS_PG:
+    import psycopg
+    from psycopg.rows import dict_row
 
 HABITS = ["sleep", "tidy", "money", "noise", "guest"]
 WEIGHTS = {"sleep": 1.5, "tidy": 1.5, "money": 1.5, "noise": 1.0, "guest": 1.0}
@@ -40,11 +46,42 @@ BOT_LIKE_THRESHOLD = 66
 
 
 # ----------------------------------------------------------------- database
+class DB:
+    def __init__(self):
+        if IS_PG:
+            self.conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, prepare_threshold=None)
+        else:
+            self.conn = sqlite3.connect(DB_PATH, timeout=15)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA foreign_keys=ON")
+
+    def execute(self, sql, params=()):
+        if IS_PG:
+            sql = sql.replace("?", "%s")
+        return self.conn.execute(sql, params)
+
+    def insert_id(self, sql, params=()):
+        if IS_PG:
+            return self.execute(sql + " RETURNING id", params).fetchone()["id"]
+        return self.execute(sql, params).lastrowid
+
+    def exec_script(self, script):
+        if IS_PG:
+            for stmt in script.split(";"):
+                if stmt.strip():
+                    self.conn.execute(stmt)
+        else:
+            self.conn.executescript(script)
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
+
 def db():
-    c = sqlite3.connect(DB_PATH, timeout=15)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA foreign_keys=ON")
-    return c
+    return DB()
 
 
 SCHEMA = """
@@ -117,15 +154,23 @@ PRIORITIES = {"cheap": "Giá rẻ", "near": "Gần trường", "quality": "Sạc
 
 def init_db():
     c = db()
-    c.executescript(SCHEMA)
-    c.execute("PRAGMA journal_mode=WAL")
-    cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
+    schema = SCHEMA
+    if IS_PG:
+        schema = (schema
+                  .replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+                  .replace(" REAL", " DOUBLE PRECISION"))
+    c.exec_script(schema)
+    if not IS_PG:
+        c.execute("PRAGMA journal_mode=WAL")
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
+    else:
+        cols = {r["column_name"] for r in c.execute("SELECT column_name FROM information_schema.columns WHERE table_name='users'").fetchall()}
     if "house_type" not in cols:
         c.execute("ALTER TABLE users ADD COLUMN house_type TEXT DEFAULT 'tro'")
         c.execute("ALTER TABLE users ADD COLUMN priority TEXT DEFAULT 'cheap'")
     if "photo_v" not in cols:
         c.execute("ALTER TABLE users ADD COLUMN photo_v INTEGER DEFAULT 0")
-    c.execute("CREATE TABLE IF NOT EXISTS photos(user_id INTEGER PRIMARY KEY, data BLOB)")
+    c.execute(f"CREATE TABLE IF NOT EXISTS photos(user_id INTEGER PRIMARY KEY, data {'BYTEA' if IS_PG else 'BLOB'})")
     fresh = not c.execute("SELECT 1 FROM users WHERE is_bot=1").fetchone()
     if fresh:
         for i, b in enumerate(BOTS):
@@ -289,8 +334,8 @@ def create_match(c, a_id, b_id, score):
     if row:
         c.execute("UPDATE matches SET active=1 WHERE id=?", (row["id"],))
         return c.execute("SELECT * FROM matches WHERE id=?", (row["id"],)).fetchone(), False
-    cur = c.execute("INSERT INTO matches(a,b,score,created) VALUES(?,?,?,?)", (a, b, score, time.time()))
-    return c.execute("SELECT * FROM matches WHERE id=?", (cur.lastrowid,)).fetchone(), True
+    mid = c.insert_id("INSERT INTO matches(a,b,score,created) VALUES(?,?,?,?)", (a, b, score, time.time()))
+    return c.execute("SELECT * FROM matches WHERE id=?", (mid,)).fetchone(), True
 
 
 def rooms_for(c, me, other, user_id, log=True):
@@ -513,7 +558,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise Err(413, "Ảnh quá lớn")
                 if not (raw[:3] == b"\xff\xd8\xff" or raw[:4] == b"\x89PNG" or raw[:4] == b"RIFF"):
                     raise Err(400, "Định dạng ảnh không hỗ trợ")
-                c.execute("INSERT OR REPLACE INTO photos VALUES(?,?)", (uid, raw))
+                c.execute("INSERT INTO photos(user_id,data) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET data=excluded.data", (uid, raw))
                 c.execute("UPDATE users SET photo_v=? WHERE id=?", (int(time.time()), uid))
             else:
                 c.execute("DELETE FROM photos WHERE user_id=?", (uid,))
@@ -600,9 +645,8 @@ class Handler(BaseHTTPRequestHandler):
                 if c.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
                     raise Err(409, "Tên đăng nhập đã tồn tại")
             salt = secrets.token_hex(16)
-            cur = c.execute("INSERT INTO users(username,salt,pw,name,color,created) VALUES(?,?,?,?,?,?)",
-                            (username, salt, hash_pw(pw, salt), name, random.randint(0, 7), time.time()))
-            uid = cur.lastrowid
+            uid = c.insert_id("INSERT INTO users(username,salt,pw,name,color,created) VALUES(?,?,?,?,?,?)",
+                              (username, salt, hash_pw(pw, salt), name, random.randint(0, 7), time.time()))
         tok = secrets.token_urlsafe(32)
         c.execute("INSERT INTO sessions VALUES(?,?,?)", (tok, uid, time.time()))
         me = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
@@ -662,7 +706,7 @@ class Handler(BaseHTTPRequestHandler):
         other = c.execute("SELECT * FROM users WHERE id=? AND id!=?", (to, uid)).fetchone()
         if not other:
             raise Err(404, "Không tìm thấy người dùng")
-        c.execute("INSERT OR REPLACE INTO swipes VALUES(?,?,?,?)", (uid, to, kind, time.time()))
+        c.execute("INSERT INTO swipes(from_id,to_id,kind,created) VALUES(?,?,?,?) ON CONFLICT(from_id,to_id) DO UPDATE SET kind=excluded.kind, created=excluded.created", (uid, to, kind, time.time()))
         if kind == "pass":
             return {"matched": False}
         score = compat(me, other)["score"]
@@ -736,26 +780,26 @@ class Handler(BaseHTTPRequestHandler):
         else:
             raise Err(400, "Loại đơn không hợp lệ")
         com = int(round(base * COMMISSION[kind] / 1000) * 1000)
-        cur = c.execute("INSERT INTO orders(user_id,kind,item_id,item_name,amount,commission,note,date,created) VALUES(?,?,?,?,?,?,?,?,?)",
-                        (me["id"], kind, item_id, name, amount, com, clean_text(b.get("note"), 300), clean_text(b.get("date"), 30), time.time()))
-        o = c.execute("SELECT * FROM orders WHERE id=?", (cur.lastrowid,)).fetchone()
+        oid = c.insert_id("INSERT INTO orders(user_id,kind,item_id,item_name,amount,commission,note,date,created) VALUES(?,?,?,?,?,?,?,?,?)",
+                          (me["id"], kind, item_id, name, amount, com, clean_text(b.get("note"), 300), clean_text(b.get("date"), 30), time.time()))
+        o = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
         return {"order": order_dict(o)}
 
     def stats(self, c):
-        one = lambda sql, *a: c.execute(sql, a).fetchone()[0] or 0
+        one = lambda sql, *a: c.execute(sql, a).fetchone()["v"] or 0
         by_kind = {r["kind"]: {"orders": r["n"], "gmv": r["g"], "commission": r["cm"]} for r in c.execute(
             "SELECT kind, COUNT(*) n, SUM(amount) g, SUM(commission) cm FROM orders GROUP BY kind").fetchall()}
         top_rooms = [{"name": r["name"], "views": r["n"]} for r in c.execute(
-            "SELECT r.name, COUNT(*) n FROM impressions i JOIN rooms r ON r.id=i.room_id GROUP BY r.id ORDER BY n DESC LIMIT 3").fetchall()]
+            "SELECT r.name, COUNT(*) n FROM impressions i JOIN rooms r ON r.id=i.room_id GROUP BY r.id, r.name ORDER BY n DESC LIMIT 3").fetchall()]
         return {
-            "users": one("SELECT COUNT(*) FROM users WHERE is_bot=0"),
-            "matches": one("SELECT COUNT(*) FROM matches"),
-            "messages": one("SELECT COUNT(*) FROM messages"),
-            "swipes": one("SELECT COUNT(*) FROM swipes"),
-            "impressions": one("SELECT COUNT(*) FROM impressions"),
-            "orders": one("SELECT COUNT(*) FROM orders"),
-            "commission": one("SELECT SUM(commission) FROM orders"),
-            "sponsor_revenue": one("SELECT COUNT(*) FROM impressions") * 2000,  # giả định 2.000đ / lượt hiển thị
+            "users": one("SELECT COUNT(*) v FROM users WHERE is_bot=0"),
+            "matches": one("SELECT COUNT(*) v FROM matches"),
+            "messages": one("SELECT COUNT(*) v FROM messages"),
+            "swipes": one("SELECT COUNT(*) v FROM swipes"),
+            "impressions": one("SELECT COUNT(*) v FROM impressions"),
+            "orders": one("SELECT COUNT(*) v FROM orders"),
+            "commission": one("SELECT SUM(commission) v FROM orders"),
+            "sponsor_revenue": one("SELECT COUNT(*) v FROM impressions") * 2000,  # giả định 2.000đ / lượt hiển thị
             "by_kind": by_kind, "top_rooms": top_rooms,
         }
 

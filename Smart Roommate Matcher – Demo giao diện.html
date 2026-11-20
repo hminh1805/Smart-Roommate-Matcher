@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Smart Roommate Matcher</title>
+<style>
+:root{--bg:#f4f1ff;--card:#fff;--tx:#1d1b2e;--mu:#6d6a85;--pr:#6c4cf5;--pr2:#ff5c8a;--ok:#16a870;--bd:#e5e1f7;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#13111f;--card:#201d33;--tx:#f1eeff;--mu:#a6a2c4;--bd:#332f4d}}
+:root[data-theme="dark"]{--bg:#13111f;--card:#201d33;--tx:#f1eeff;--mu:#a6a2c4;--bd:#332f4d}
+*{box-sizing:border-box;margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+html,body{height:100%;background:var(--bg);color:var(--tx)}
+body{display:flex;justify-content:center;align-items:center}
+#app{width:100%;max-width:400px;height:100%;max-height:780px;background:var(--bg);display:flex;flex-direction:column;position:relative;overflow:hidden;border:1px solid var(--bd);border-radius:18px}
+@media(max-width:420px){#app{border-radius:0;border:0;max-height:none}}
+header{padding:14px 18px;font-weight:800;font-size:18px;display:flex;justify-content:space-between;align-items:center}
+header span{background:linear-gradient(90deg,var(--pr),var(--pr2));-webkit-background-clip:text;background-clip:text;color:transparent}
+main{flex:1;overflow-y:auto;padding:0 16px 16px}
+nav{display:flex;border-top:1px solid var(--bd);background:var(--card)}
+nav button{flex:1;padding:10px 0;border:0;background:none;color:var(--mu);font-size:12px;cursor:pointer}
+nav button b{display:block;font-size:20px}
+nav button.on{color:var(--pr);font-weight:700}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:16px;margin-bottom:12px}
+.btn{border:0;border-radius:12px;padding:12px 16px;font-weight:700;font-size:15px;cursor:pointer;background:var(--pr);color:#fff;width:100%}
+.btn.sec{background:var(--bd);color:var(--tx)}
+.btn.sm{width:auto;padding:8px 12px;font-size:13px}
+h2{font-size:20px;margin:6px 0 4px}p.mu,.mu{color:var(--mu);font-size:13px}
+label{display:flex;justify-content:space-between;font-size:14px;font-weight:600;margin-top:12px}
+input[type=range]{width:100%;accent-color:var(--pr)}
+.ends{display:flex;justify-content:space-between;font-size:11px;color:var(--mu)}
+select,input[type=text]{width:100%;padding:10px;border-radius:10px;border:1px solid var(--bd);background:var(--bg);color:var(--tx);margin-top:6px}
+.deck{position:relative;height:430px;margin-top:6px}
+.pcard{position:absolute;inset:0;background:var(--card);border:1px solid var(--bd);border-radius:20px;padding:18px;touch-action:none;cursor:grab;box-shadow:0 8px 24px rgba(80,60,160,.15);transition:transform .25s}
+.ava{width:76px;height:76px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:38px;background:var(--bd)}
+.score{position:absolute;top:18px;right:18px;text-align:center;font-weight:800;color:var(--ok);font-size:26px}
+.score small{display:block;font-size:11px;color:var(--mu);font-weight:500}
+.bar{margin-top:8px;font-size:12px;color:var(--mu)}.bar div{height:7px;border-radius:5px;background:var(--bd);margin-top:3px;overflow:hidden}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--pr),var(--pr2))}
+.stamp{position:absolute;top:90px;font-size:28px;font-weight:900;padding:2px 10px;border:3px solid;border-radius:8px;opacity:0;transform:rotate(-12deg)}
+.acts{display:flex;justify-content:center;gap:28px;margin-top:14px}
+.acts button{width:62px;height:62px;border-radius:50%;border:0;font-size:28px;cursor:pointer;background:var(--card);box-shadow:0 4px 14px rgba(80,60,160,.2)}
+.row{display:flex;gap:12px;align-items:center}.row>div{flex:1}
+.tag{display:inline-block;font-size:11px;padding:2px 8px;border-radius:20px;background:var(--bd);margin-right:4px}
+.tag.ad{background:#ffe9b8;color:#7a5200}
+.tabs{display:flex;gap:6px;margin:4px 0 12px}.tabs button{flex:1;padding:8px;border-radius:10px;border:1px solid var(--bd);background:var(--card);color:var(--tx);font-size:13px;cursor:pointer}.tabs button.on{background:var(--pr);color:#fff;border-color:var(--pr)}
+.modal{position:absolute;inset:0;background:rgba(10,8,25,.65);display:none;align-items:flex-end;z-index:5}.modal.show{display:flex}
+.sheet{background:var(--bg);width:100%;border-radius:22px 22px 0 0;padding:18px;max-height:92%;overflow-y:auto}
+.chat{display:flex;flex-direction:column;gap:6px;height:340px;overflow-y:auto;padding:4px}
+.msg{padding:8px 12px;border-radius:14px;max-width:80%;font-size:14px;background:var(--bd)}.msg.me{align-self:flex-end;background:var(--pr);color:#fff}
+#toast{position:absolute;left:16px;right:16px;bottom:80px;background:#1d1b2e;color:#fff;padding:12px;border-radius:12px;font-size:13px;display:none;z-index:9}
+.stat{font-size:26px;font-weight:800;color:var(--pr)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+</style>
+</head>
+<body>
+<div id="app">
+  <header><span>🏠 Smart Roommate</span><div class="mu" id="hint"></div></header>
+  <main id="main"></main>
+  <nav id="nav" style="display:none">
+    <button data-t="disc"><b>🔥</b>Khám phá</button>
+    <button data-t="mat"><b>💬</b>Match</button>
+    <button data-t="svc"><b>🧰</b>Dịch vụ</button>
+    <button data-t="me"><b>👤</b>Hồ sơ</button>
+  </nav>
+  <div class="modal" id="modal"><div class="sheet" id="sheet"></div></div>
+  <div id="toast"></div>
+</div>
+<script>
+const HABITS=[
+ ["sleep","🌙 Giờ giấc","Dậy sớm","Cú đêm"],
+ ["tidy","🧹 Gọn gàng","Thoải mái","Rất sạch"],
+ ["money","💸 Sòng phẳng tiền","Dễ tính","Chia rõ ràng"],
+ ["noise","🔊 Độ ồn","Yên tĩnh","Vui vẻ ồn ào"],
+ ["guest","👥 Đưa bạn về phòng","Hiếm khi","Thường xuyên"]];
+const PEOPLE=[
+ {n:"Minh Anh",e:"👩‍🎓",s:"ĐH Kinh tế TP.HCM",h:{sleep:2,tidy:4,money:5,noise:2,guest:2}},
+ {n:"Quốc Bảo",e:"👨‍💻",s:"ĐH Bách Khoa",h:{sleep:5,tidy:2,money:3,noise:4,guest:3}},
+ {n:"Thảo Vy",e:"👩‍🎨",s:"ĐH Văn Lang",h:{sleep:3,tidy:5,money:4,noise:1,guest:1}},
+ {n:"Hoàng Nam",e:"🧑‍🔬",s:"ĐH Khoa học Tự nhiên",h:{sleep:4,tidy:3,money:4,noise:3,guest:4}},
+ {n:"Ngọc Trâm",e:"👩‍💼",s:"ĐH Ngoại thương",h:{sleep:1,tidy:4,money:5,noise:2,guest:2}},
+ {n:"Đức Huy",e:"🧑‍🎤",s:"ĐH Công nghiệp",h:{sleep:5,tidy:1,money:2,noise:5,guest:5}}];
+const ROOMS=[
+ {n:"Phòng 25m² có gác – Q.Bình Thạnh",p:"3.800.000đ/tháng",d:"Cách trường 1,2km · Chủ trọ Cô Lan",ad:1},
+ {n:"Chung cư mini full nội thất – Q.10",p:"5.500.000đ/tháng",d:"2 người ở · Gần Bách Khoa",ad:1},
+ {n:"Phòng 2 giường – Gò Vấp",p:"3.200.000đ/tháng",d:"Có máy lạnh, wifi free",ad:0}];
+const TRUCKS=[
+ {n:"Anh Tùng – Xe ba gác",p:"150.000đ/chuyến",d:"⭐4.9 · 120 chuyến"},
+ {n:"Chú Sáu – Xe tải mini",p:"300.000đ/chuyến",d:"⭐4.8 · Có bốc xếp"}];
+const CLEAN=[
+ {n:"Đội vệ sinh Sạch Xinh",p:"250.000đ/phòng",d:"Dọn phòng mới 2 giờ"},
+ {n:"Dọn nhà Mây Trắng",p:"200.000đ/phòng",d:"Gồm lau kính, toilet"}];
+const USED=[{n:"Đồ cũ Sinh Viên Shop",p:"Từ 50.000đ",d:"Quạt, kệ sách, nệm"}];
+const S={me:{sleep:3,tidy:3,money:3,noise:3,guest:3,budget:"3-5"},tab:"disc",idx:0,matches:[],svcTab:0,
+ stat:{imp:0,orders:0,commission:0},orders:[]};
+const $=id=>document.getElementById(id);
+const toast=t=>{const e=$("toast");e.textContent=t;e.style.display="block";clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display="none",2400)};
+const score=p=>{let w=0,t=0;HABITS.forEach(([k])=>{const wt=(k==="sleep"||k==="tidy"||k==="money")?1.5:1;w+=Math.abs(S.me[k]-p.h[k])/4*wt;t+=wt});return Math.round(100-w/t*100)};
+const num=s=>parseInt(s.replace(/\D/g,""));
+
+function setup(){
+ $("nav").style.display="none";
+ $("main").innerHTML=`<h2>Thiết lập thói quen sinh hoạt</h2><p class="mu">Kéo thanh trượt theo đúng con người bạn — hệ thống sẽ tính độ tương đồng.</p>
+ <div class="card">${HABITS.map(([k,l,a,b])=>`<label>${l}<span id="v_${k}">${S.me[k]}/5</span></label>
+ <input type="range" min="1" max="5" value="${S.me[k]}" oninput="S.me.${k}=+this.value;$('v_${k}').textContent=this.value+'/5'">
+ <div class="ends"><span>${a}</span><span>${b}</span></div>`).join("")}
+ <label>💰 Ngân sách/người/tháng</label>
+ <select onchange="S.me.budget=this.value"><option value="2-3">2 – 3 triệu</option><option value="3-5" selected>3 – 5 triệu</option><option value="5+">Trên 5 triệu</option></select></div>
+ <button class="btn" onclick="go('disc')">Bắt đầu tìm bạn cùng phòng 🚀</button>
+ <p class="mu" style="text-align:center;margin-top:8px">Miễn phí 100% cho sinh viên</p>`;
+}
+function go(t){S.tab=t;$("nav").style.display="flex";[...$("nav").children].forEach(b=>b.classList.toggle("on",b.dataset.t===t));({disc,mat,svc,me}[t])()}
+[...document.querySelectorAll("nav button")].forEach(b=>b.onclick=()=>go(b.dataset.t));
+
+function disc(){
+ const list=PEOPLE.map(p=>({...p,sc:score(p)})).sort((a,b)=>b.sc-a.sc);
+ S.list=list;
+ if(S.idx>=list.length){$("main").innerHTML=`<div class="card" style="text-align:center;margin-top:40px"><div style="font-size:50px">🎉</div><h2>Hết hồ sơ phù hợp</h2><p class="mu">Bạn đã xem tất cả. Thử xem lại danh sách?</p><br><button class="btn" onclick="S.idx=0;disc()">Xem lại từ đầu</button></div>`;return}
+ const p=list[S.idx];
+ $("main").innerHTML=`<div class="deck"><div class="pcard" id="pc">
+  <div class="stamp" id="st" style="right:20px;color:var(--ok)">MATCH?</div>
+  <div class="score">${p.sc}%<small>tương đồng</small></div>
+  <div class="ava">${p.e}</div><h2>${p.n}</h2><p class="mu">${p.s}</p>
+  <div style="margin-top:10px">${HABITS.map(([k,l])=>`<div class="bar">${l} <span style="float:right">Bạn ${S.me[k]} · ${p.n.split(" ")[1]||p.n} ${p.h[k]}</span><div><i style="width:${100-Math.abs(S.me[k]-p.h[k])*25}%"></i></div></div>`).join("")}</div>
+ </div></div>
+ <div class="acts"><button onclick="swipe(0)">✕</button><button onclick="swipe(1)">💜</button></div>
+ <p class="mu" style="text-align:center;margin-top:10px">Kéo thẻ sang phải để thích, sang trái để bỏ qua</p>`;
+ const c=$("pc");let x0=null,dx=0;
+ c.onpointerdown=e=>{x0=e.clientX;c.style.transition="none";c.setPointerCapture(e.pointerId)};
+ c.onpointermove=e=>{if(x0===null)return;dx=e.clientX-x0;c.style.transform=`translateX(${dx}px) rotate(${dx/18}deg)`};
+ c.onpointerup=()=>{if(x0===null)return;x0=null;c.style.transition="";if(Math.abs(dx)>90)swipe(dx>0?1:0);else c.style.transform="";dx=0};
+}
+function swipe(like){
+ const p=S.list[S.idx],c=$("pc");
+ c.style.transition="transform .3s";c.style.transform=`translateX(${like?420:-420}px) rotate(${like?20:-20}deg)`;
+ setTimeout(()=>{S.idx++;
+  if(like&&p.sc>=60){S.matches.push({...p,chat:[{me:0,t:"Chào bạn! Mình thấy tụi mình khá hợp thói quen 😄"}]});match(p)}
+  else{if(like)toast("Đã thích "+p.n+" — chờ họ thích lại");disc()}},280);
+}
+function match(p){
+ S.stat.imp+=2;
+ $("sheet").innerHTML=`<div style="text-align:center"><div style="font-size:46px">🎉</div><h2>Match thành công!</h2>
+ <p class="mu">Bạn và <b>${p.n}</b> hợp nhau ${p.sc}%</p></div>
+ <p style="font-weight:700;margin:14px 0 8px">🏘️ Gợi ý phòng trống cho 2 bạn</p>
+ ${ROOMS.slice(0,2).map((r,i)=>`<div class="card"><span class="tag ad">Tài trợ</span><b>${r.n}</b><p class="mu">${r.d}</p>
+ <div class="row"><div><b style="color:var(--pr)">${r.p}</b></div><button class="btn sm" onclick="book(${i})">Xem phòng</button></div></div>`).join("")}
+ <button class="btn" onclick="closeM();go('mat')">Nhắn tin cho ${p.n}</button>
+ <button class="btn sec" style="margin-top:8px" onclick="closeM();disc()">Tiếp tục quẹt</button>`;
+ $("modal").classList.add("show");
+}
+const closeM=()=>$("modal").classList.remove("show");
+function book(i){S.stat.orders++;S.stat.commission+=Math.round(num(ROOMS[i].p)*0.1/100)*100*0;toast("✅ Đã gửi yêu cầu xem phòng tới chủ trọ");S.stat.imp+=0}
+
+function mat(){
+ $("main").innerHTML=`<h2>Tin nhắn & Match</h2>`+(S.matches.length?S.matches.map((m,i)=>`<div class="card row" style="cursor:pointer" onclick="chat(${i})"><div class="ava" style="width:50px;height:50px;font-size:26px">${m.e}</div><div><b>${m.n}</b> <span class="tag">${m.sc}%</span><p class="mu">${m.chat[m.chat.length-1].t}</p></div></div>`).join(""):`<div class="card" style="text-align:center"><p class="mu">Chưa có match nào. Qua tab Khám phá và thả tim vài bạn nhé!</p></div>`);
+}
+function chat(i){
+ const m=S.matches[i];
+ const draw=()=>{$("sheet").innerHTML=`<div class="row"><b style="flex:1">${m.e} ${m.n}</b><button class="btn sm sec" onclick="closeM()">Đóng</button></div>
+ <div class="chat" id="ch">${m.chat.map(c=>`<div class="msg ${c.me?"me":""}">${c.t}</div>`).join("")}</div>
+ <div class="row" style="margin-top:8px"><div><input type="text" id="ci" placeholder="Nhập tin nhắn…" onkeydown="if(event.key==='Enter')send(${i})"></div><button class="btn sm" onclick="send(${i})">Gửi</button></div>
+ <button class="btn sec" style="margin-top:8px" onclick="closeM();S.svcTab=0;go('svc')">🧰 Tìm phòng & dịch vụ chuyển nhà</button>`;const ch=$("ch");ch.scrollTop=ch.scrollHeight};
+ window.redraw=draw;draw();$("modal").classList.add("show");
+}
+function send(i){
+ const v=$("ci").value.trim();if(!v)return;const m=S.matches[i];
+ m.chat.push({me:1,t:v});redraw();
+ const rep=["Ok bạn, mình thường ngủ khoảng 11h nhé","Chia tiền điện nước theo đầu người nha 👍","Hay là mình cùng đi xem phòng cuối tuần?","Mình cũng nghĩ vậy!"];
+ setTimeout(()=>{m.chat.push({me:0,t:rep[Math.floor(Math.random()*rep.length)]});redraw()},900);
+}
+
+function svc(){
+ const sets=[ROOMS,TRUCKS,CLEAN,USED];
+ const names=["🏘️ Phòng","🚚 Xe chuyển","🧽 Dọn dẹp","🛋️ Đồ cũ"];
+ $("main").innerHTML=`<h2>Hệ sinh thái chuyển nhà</h2>
+ <div class="tabs">${names.map((n,i)=>`<button class="${i===S.svcTab?"on":""}" onclick="S.svcTab=${i};svc()">${n}</button>`).join("")}</div>
+ ${sets[S.svcTab].map((r,i)=>`<div class="card">${r.ad?'<span class="tag ad">Ưu tiên hiển thị</span>':""}<b>${r.n}</b><p class="mu">${r.d}</p>
+ <div class="row"><div><b style="color:var(--pr)">${r.p}</b></div><button class="btn sm" onclick="order(${S.svcTab},${i})">${S.svcTab===0?"Đặt lịch xem":"Đặt ngay"}</button></div></div>`).join("")}`;
+}
+function order(t,i){
+ const sets=[ROOMS,TRUCKS,CLEAN,USED],r=sets[t][i];
+ const amt=isNaN(num(r.p))?0:num(r.p);
+ const base=t===0?amt*0.5:amt;
+ const com=Math.round(base*0.12/1000)*1000;
+ S.stat.orders++;S.stat.commission+=com;S.orders.push(r.n);
+ toast("✅ Đã đặt: "+r.n);
+}
+function me(){
+ const f=n=>n.toLocaleString("vi-VN")+"đ";
+ $("main").innerHTML=`<h2>Hồ sơ của tôi</h2>
+ <div class="card">${HABITS.map(([k,l])=>`<div class="bar">${l}<span style="float:right">${S.me[k]}/5</span><div><i style="width:${S.me[k]*20}%"></i></div></div>`).join("")}
+ <button class="btn sec" style="margin-top:12px" onclick="setup()">✏️ Chỉnh sửa thói quen</button></div>
+ <h2 style="font-size:16px">📊 Demo doanh thu nền tảng (B2B)</h2>
+ <p class="mu" style="margin-bottom:8px">Minh họa mô hình kiếm tiền từ phiên test này</p>
+ <div class="grid"><div class="card"><div class="stat">${S.matches.length}</div><p class="mu">Cặp match</p></div>
+ <div class="card"><div class="stat">${S.stat.imp}</div><p class="mu">Lượt hiển thị phòng tài trợ</p></div>
+ <div class="card"><div class="stat">${S.stat.orders}</div><p class="mu">Đơn dịch vụ / xem phòng</p></div>
+ <div class="card"><div class="stat" style="font-size:18px">${f(S.stat.commission)}</div><p class="mu">Hoa hồng ước tính (~12%)</p></div></div>
+ <button class="btn sec" onclick="S.idx=0;S.matches=[];S.stat={imp:0,orders:0,commission:0};toast('Đã reset demo');me()">Reset dữ liệu demo</button>`;
+}
+$("modal").onclick=e=>{if(e.target.id==="modal")closeM()};
+setup();
+</script>
+</body>
+</html>

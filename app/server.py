@@ -123,12 +123,32 @@ def fmt_vn_time(ts=None):
 _PG_POOL = queue.LifoQueue(maxsize=8)
 _AUTH_CACHE = {}
 _AUTH_LOCK = threading.Lock()
+_USERS_CACHE = {"ts": 0.0, "rows": {}}
+_USERS_LOCK = threading.Lock()
 _GSHEET_LOCK = threading.Lock()
 _GSHEET_CACHE = {"ts": 0.0, "rows": [], "ok": False}
 _RECENT_SYNCED = []
 _ROOMS_CACHE = []
 _SERVICES_CACHE = {}
 _STATIC_CACHE = {}
+
+
+def _invalidate_users_cache():
+    with _USERS_LOCK:
+        _USERS_CACHE["ts"] = 0.0
+        _USERS_CACHE["rows"] = {}
+
+
+def _get_all_users(c):
+    now = time.time()
+    with _USERS_LOCK:
+        if _USERS_CACHE["rows"] and now - _USERS_CACHE["ts"] < 30.0:
+            return dict(_USERS_CACHE["rows"])
+    rows = {r["id"]: dict(r) for r in c.execute("SELECT * FROM users").fetchall()}
+    with _USERS_LOCK:
+        _USERS_CACHE["ts"] = time.time()
+        _USERS_CACHE["rows"] = dict(rows)
+    return rows
 
 
 def _cache_get_user(tok):
@@ -151,7 +171,7 @@ def _cache_set_user(tok, row):
     with _AUTH_LOCK:
         if len(_AUTH_CACHE) > 2000:
             _AUTH_CACHE.clear()
-        _AUTH_CACHE[tok] = (dict(row), time.time() + 60)
+        _AUTH_CACHE[tok] = (dict(row), time.time() + 600)
 
 
 def _cache_drop_token(tok):
@@ -178,7 +198,7 @@ class DB:
                     conn, ts = _PG_POOL.get_nowait()
                 except queue.Empty:
                     break
-                if conn.closed or now - ts > 240:
+                if conn.closed or now - ts > 900:
                     try:
                         conn.close()
                     except Exception:
@@ -197,6 +217,7 @@ class DB:
             if self.conn is None:
                 self.conn = psycopg.connect(
                     DATABASE_URL,
+                    autocommit=True,
                     row_factory=dict_row,
                     prepare_threshold=None,
                     keepalives=1,
@@ -228,11 +249,12 @@ class DB:
             self.conn.executescript(script)
 
     def commit(self):
-        self.conn.commit()
+        if not IS_PG:
+            self.conn.commit()
 
     def rollback(self):
         try:
-            if self.conn and (not IS_PG or not self.conn.closed):
+            if self.conn and (not IS_PG or (not self.conn.closed and self.conn.info.transaction_status != 0)):
                 self.conn.rollback()
         except Exception:
             pass
@@ -442,6 +464,21 @@ def init_db():
     c.commit()
     _load_catalog(c)
     c.close()
+    _invalidate_users_cache()
+    if IS_PG:
+        def _warm_pg_pool():
+            for _ in range(2):
+                try:
+                    if _PG_POOL.qsize() >= 3:
+                        break
+                    conn = psycopg.connect(
+                        DATABASE_URL, autocommit=True, row_factory=dict_row, prepare_threshold=None,
+                        keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3,
+                    )
+                    _PG_POOL.put_nowait((conn, time.time()))
+                except Exception:
+                    break
+        threading.Thread(target=_warm_pg_pool, daemon=True).start()
 
 
 # ----------------------------------------------------------------- logic
@@ -731,6 +768,7 @@ def apply_profile(c, uid, p):
     fields["onboarded"] = 1
     sets = ",".join(f"{k}=?" for k in fields)
     c.execute(f"UPDATE users SET {sets} WHERE id=?", (*fields.values(), uid))
+    _invalidate_users_cache()
 
 
 GFORM_FEAT_FROM_FULL = {full: short for short, full in GFORM_FEAT_PAIRS}
@@ -1221,6 +1259,7 @@ class Handler(BaseHTTPRequestHandler):
                 c.execute("DELETE FROM photos WHERE user_id=?", (uid,))
                 c.execute("UPDATE users SET photo_v=0 WHERE id=?", (uid,))
             me = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            _invalidate_users_cache()
             _cache_drop_user(uid)
             _cache_set_user(self._tok(), me)
             return {"user": self.me_dict(c, me)}
@@ -1313,6 +1352,7 @@ class Handler(BaseHTTPRequestHandler):
             now = time.time()
             uid = c.insert_id("INSERT INTO users(username,salt,pw,name,color,created,created_real_time) VALUES(?,?,?,?,?,?,?)",
                               (username, salt, hash_pw(pw, salt), name, random.randint(0, 7), now, fmt_vn_time(now)))
+            _invalidate_users_cache()
         tok = secrets.token_urlsafe(32)
         now = time.time()
         c.execute("INSERT INTO sessions(token,user_id,created,created_real_time) VALUES(?,?,?,?)", (tok, uid, now, fmt_vn_time(now)))
@@ -1331,16 +1371,24 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             raise Err(400, "Bộ lọc không hợp lệ")
         uni = q.get("uni", "")
-        rows = c.execute(
-            "SELECT u.*, ls.kind AS _lk"
-            " FROM users u"
-            " LEFT JOIN swipes ls ON ls.from_id=u.id AND ls.to_id=?"
-            " WHERE u.id!=? AND u.onboarded=1"
-            "   AND u.id NOT IN (SELECT to_id FROM swipes WHERE from_id=?)"
-            "   AND u.id NOT IN (SELECT CASE WHEN a=? THEN b ELSE a END FROM matches WHERE (a=? OR b=?) AND active=1)",
-            (uid, uid, uid, uid, uid, uid)).fetchall()
+        rel_rows = c.execute(
+            "SELECT 1 AS t, to_id AS oid, kind FROM swipes WHERE from_id=?"
+            " UNION ALL "
+            "SELECT 2 AS t, from_id AS oid, kind FROM swipes WHERE to_id=? AND kind IN ('like','super')"
+            " UNION ALL "
+            "SELECT 3 AS t, CASE WHEN a=? THEN b ELSE a END AS oid, '' AS kind FROM matches WHERE (a=? OR b=?) AND active=1",
+            (uid, uid, uid, uid, uid),
+        ).fetchall()
+        swiped_out = {r["oid"]: r["kind"] for r in rel_rows if r["t"] == 1}
+        liked_in = {r["oid"]: r["kind"] for r in rel_rows if r["t"] == 2}
+        matched_ids = {r["oid"] for r in rel_rows if r["t"] == 3}
+        all_users = _get_all_users(c)
+        onb_users = [u for u in all_users.values() if u.get("onboarded")]
         out = []
-        for r in rows:
+        for r in onb_users:
+            rid = r["id"]
+            if rid == uid or rid in swiped_out or rid in matched_ids:
+                continue
             if not gender_ok(me, r):
                 continue
             if uni and r["university"] != uni:
@@ -1368,16 +1416,15 @@ class Handler(BaseHTTPRequestHandler):
             d = user_row_to_dict(r, me)
             if d["compat"]["score"] < min_score:
                 continue
-            # người thật đã thích / siêu thích mình -> ưu tiên lên đầu (siêu thích trên cùng)
-            lk = r["_lk"] if r["_lk"] in ("like", "super") else ""
+            lk_raw = liked_in.get(rid, "")
+            lk = lk_raw if lk_raw in ("like", "super") else ""
             d["liked_you"] = bool(lk)
             d["liked_kind"] = lk
             out.append(d)
         out.sort(key=lambda d: (0 if d["liked_kind"] == "super" else (1 if d["liked_kind"] == "like" else 2), -d["compat"]["score"]))
-        meta = c.execute("SELECT id, university, area FROM users WHERE onboarded=1").fetchall()
-        unis = sorted({r["university"] for r in meta if r["university"]})
-        areas = sorted({r["area"] for r in meta if r["area"] and r["id"] != uid})
-        passed_cnt = int(c.execute("SELECT COUNT(*) n FROM swipes WHERE from_id=? AND kind='pass'", (uid,)).fetchone()["n"] or 0)
+        unis = sorted({r["university"] for r in onb_users if r.get("university")})
+        areas = sorted({r["area"] for r in onb_users if r.get("area") and r["id"] != uid})
+        passed_cnt = sum(1 for k in swiped_out.values() if k == "pass")
         return {"candidates": out[:40], "total": len(out), "universities": unis, "areas": areas, "passed_count": passed_cnt}
 
     def swipe(self, c, me, b):
@@ -1395,7 +1442,9 @@ class Handler(BaseHTTPRequestHandler):
             now = time.time()
             c.execute("INSERT INTO swipes(from_id,to_id,kind,created,created_real_time) VALUES(?,?,?,?,?) ON CONFLICT(from_id,to_id) DO UPDATE SET kind=excluded.kind, created=excluded.created, created_real_time=excluded.created_real_time", (uid, to, kind, now, fmt_vn_time(now)))
             return {"matched": False}
-        other = c.execute("SELECT * FROM users WHERE id=? AND id!=?", (to, uid)).fetchone()
+        other = _get_all_users(c).get(to) if to != uid else None
+        if other is None:
+            other = c.execute("SELECT * FROM users WHERE id=? AND id!=?", (to, uid)).fetchone()
         if not other:
             raise Err(404, "Không tìm thấy người dùng")
         res_extra = {}

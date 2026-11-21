@@ -27,7 +27,7 @@ const FB_PITCH = [['viral', '🚀 Kéo user 0đ (viral ĐH)'], ['margin', '💵 
 const GFORM_URL = 'https://docs.google.com/forms/d/e/1FAIpQLScdrtJhaZqZPcbm23yuSHfcj3BnW_cLO5_iGEoHl1ubgLnuKw/viewform';
 const GSHEET_URL = 'https://docs.google.com/spreadsheets/d/1yyhkIJoekoE07vBuJdx3BTPCEeSwWZqS3ysyo1geUwU/edit';
 
-const S = { token: localStorage.getItem('rm_token'), user: null, tab: 'disc', deck: [], unis: [], filters: { min: 0, uni: '', area: '', house: '', prio: '', bud: '', tag: '', sleep: '', tidy: '', photo: '' }, last: null, history: [], passedCount: 0, deckLoading: false, busy: false, matches: [], matchesLoaded: false, unread: 0, svc: 'room', svcCache: {}, onb: null, fb: null, loaded: false };
+const S = { token: localStorage.getItem('rm_token'), user: null, tab: 'disc', deck: [], pool: [], passedIds: new Set(), swipedIds: new Set(), unis: [], filters: { min: 0, uni: '', area: '', house: '', prio: '', bud: '', tag: '', sleep: '', tidy: '', photo: '' }, last: null, history: [], passedCount: 0, deckLoading: false, busy: false, matches: [], matchesLoaded: false, unread: 0, svc: 'room', svcCache: {}, onb: null, fb: null, loaded: false };
 let chatTimer = null, pollTimer = null, pollBusy = false, swipeChain = Promise.resolve(), deckReqId = 0;
 
 /* ---------- helpers ---------- */
@@ -92,7 +92,7 @@ async function boot() {
 }
 function logout(silent) {
   if (!silent && S.token) api('logout', 'POST').catch(() => { });
-  localStorage.removeItem('rm_token'); S.token = null; S.user = null; S.deck = []; S.history = []; S.passedCount = 0; S.deckLoading = false; S.loaded = false; S.matches = []; S.matchesLoaded = false; S.svcCache = {};
+  localStorage.removeItem('rm_token'); S.token = null; S.user = null; S.deck = []; S.pool = []; S.passedIds = new Set(); S.swipedIds = new Set(); S.history = []; S.passedCount = 0; S.deckLoading = false; S.loaded = false; S.matches = []; S.matchesLoaded = false; S.svcCache = {};
   clearInterval(pollTimer); closeChat(); closeSheet(); route();
 }
 function route() {
@@ -208,7 +208,7 @@ function onboarding(first, step = 0) {
     const btn = $('#o_next'), old = btn.textContent;
     btn.disabled = true; btn.textContent = 'Đang lưu…';
     try {
-      const d = await api('me', 'PUT', o); S.user = d.user; S.onb = null; S.deck = []; S.history = []; S.loaded = false;
+      const d = await api('me', 'PUT', o); S.user = d.user; S.onb = null; S.deck = []; S.pool = []; S.passedIds = new Set(); S.swipedIds = new Set(); S.history = []; S.loaded = false;
       toast(first ? 'Hồ sơ đã sẵn sàng! Bắt đầu quẹt thôi 🎉' : 'Đã lưu hồ sơ'); shell(S.user.onboarded && !first ? 'me' : 'disc');
     } catch (e) { $('#o_err').textContent = e.message; btn.disabled = false; btn.textContent = old; }
   };
@@ -221,6 +221,11 @@ function shell(tab) {
   <nav class="tabbar">${[['disc', 'Khám phá'], ['mat', 'Tin nhắn'], ['svc', 'Dịch vụ'], ['me', 'Hồ sơ']].map(([k, l]) => `<button data-t="${k}" class="${S.tab === k ? 'on' : ''}">${ICONS[k]}${l}<span class="bdg" id="bdg_${k}" style="display:none"></span></button>`).join('')}</nav>`;
   document.querySelectorAll('.tabbar button').forEach(b => b.onclick = () => switchTab(b.dataset.t));
   renderTab(); refreshUnread();
+  setTimeout(() => {
+    if (!S.token) return;
+    if (!S.svcCache.room) api('rooms').then(d => { S.svcCache.room = d.rooms; }).catch(() => {});
+    if (!S.svcCache.truck) api('services?kind=truck').then(d => { S.svcCache.truck = d.services; }).catch(() => {});
+  }, 400);
   clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
     if (document.hidden || pollBusy) return;
@@ -251,9 +256,13 @@ async function loadDeck(resetPass = false) {
     const q = filterQuery(resetPass);
     const d = await api('discover?' + q);
     if (reqId !== deckReqId) return;
-    S.deck = d.candidates; S.unis = d.universities; S.areas = d.areas;
+    const byId = new Map(S.pool.map(u => [u.id, u]));
+    d.candidates.forEach(u => byId.set(u.id, u));
+    S.pool = [...byId.values()].sort((a, b) => (a.liked_kind === 'super' ? 0 : a.liked_kind === 'like' ? 1 : 2) - (b.liked_kind === 'super' ? 0 : b.liked_kind === 'like' ? 1 : 2) || b.compat.score - a.compat.score);
+    S.deck = d.candidates.filter(u => !S.swipedIds.has(u.id) && !S.passedIds.has(u.id));
+    S.unis = d.universities; S.areas = d.areas;
     S.passedCount = d.passed_count ?? 0; S.loaded = true;
-    d.candidates.slice(0, 4).forEach(u => { if (u.photo) { const im = new Image(); im.src = u.photo; } });
+    S.deck.slice(0, 4).forEach(u => { if (u.photo) { const im = new Image(); im.src = u.photo; } });
   } finally {
     if (reqId === deckReqId) S.deckLoading = false;
   }
@@ -292,10 +301,10 @@ function drawDeck() {
     if (S.deckLoading) { deck.innerHTML = '<div class="spin"></div>'; return; }
     if (filterActive() && !S.passedCount) {
       deck.innerHTML = `<div class="empty"><div class="em">🔍</div><h2 class="t">Chưa có hồ sơ khớp bộ lọc</h2><p class="mu">Không tìm thấy bạn nào đạt đủ các tiêu chí đang lọc. Bạn thử nới độ hợp tối thiểu hoặc bớt tiêu chí lọc nhé.</p><br>
-      <button class="btn" onclick="openFilters()">🎛️ Chỉnh lại bộ lọc</button><button class="btn ghost" style="margin-top:10px" onclick="S.filters={...FDEF};S.loaded=false;renderDisc(true)">✕ Xóa bộ lọc</button></div>`;
+      <button class="btn" onclick="openFilters()">🎛️ Chỉnh lại bộ lọc</button><button class="btn ghost" style="margin-top:10px" onclick="applyFilterInstant(FDEF,true)">✕ Xóa bộ lọc</button></div>`;
     } else {
       deck.innerHTML = `<div class="empty"><div class="em">🎉</div><h2 class="t">Bạn đã xem hết rồi!</h2><p class="mu">Quay lại sau để gặp thêm bạn mới, hoặc xem lại những người đã bỏ qua.</p><br>
-      <button class="btn" onclick="resetPassed()">↺ Xem lại người đã bỏ qua</button>${filterActive() ? '<button class="btn ghost" style="margin-top:10px" onclick="S.filters={...FDEF};S.loaded=false;renderDisc(true)">Xóa bộ lọc</button>' : ''}</div>`;
+      <button class="btn" onclick="resetPassed()">↺ Xem lại người đã bỏ qua</button>${filterActive() ? '<button class="btn ghost" style="margin-top:10px" onclick="applyFilterInstant(FDEF,true)">Xóa bộ lọc</button>' : ''}</div>`;
     }
     $('#acts').innerHTML = ''; return;
   }
@@ -352,7 +361,7 @@ function fly(kind, dx, dy) {
   }
   const u = S.deck.shift(); S.last = u;
   S.history.push({ user: u, kind }); if (S.history.length > 10) S.history.shift();
-  if (kind === 'pass') S.passedCount = (S.passedCount || 0) + 1;
+  if (kind === 'pass') { S.passedIds.add(u.id); S.passedCount = (S.passedCount || 0) + 1; } else S.swipedIds.add(u.id);
   if (S.user?.counts) S.user.counts.swiped++;
   if (kind === 'super' && S.user) { S.user.super_left = Math.max(0, (S.user.super_left ?? 3) - 1); syncActs(); }
   el.classList.add('flying'); el.style.pointerEvents = 'none';
@@ -401,6 +410,7 @@ async function undoSwipe() {
   if (S.history.length) {
     ++deckReqId;
     const item = S.history.pop();
+    S.passedIds.delete(item.user.id); S.swipedIds.delete(item.user.id);
     if (!S.deck.some(x => x.id === item.user.id)) S.deck.unshift(item.user);
     if (S.user?.counts) S.user.counts.swiped = Math.max(0, S.user.counts.swiped - 1);
     if (item.kind === 'super' && S.user) S.user.super_left = Math.min(3, (S.user.super_left ?? 0) + 1);
@@ -427,6 +437,7 @@ async function undoSwipe() {
   swipeChain = swipeChain.then(async () => {
     try {
       const d = await api('undo', 'POST');
+      S.passedIds.delete(d.user.id); S.swipedIds.delete(d.user.id);
       if (S.user?.counts) S.user.counts.swiped = Math.max(0, S.user.counts.swiped - 1);
       if (d.super_left !== undefined && S.user) S.user.super_left = d.super_left;
       if (!S.deck.some(x => x.id === d.user.id)) S.deck.unshift(d.user);
@@ -436,10 +447,44 @@ async function undoSwipe() {
     finally { S.busy = false; }
   });
 }
-async function resetPassed() {
-  S.history = S.history.filter(x => x.kind !== 'pass');
-  await swipeChain.catch(() => {});
-  await api('reset-swipes', 'POST'); S.loaded = false; renderDisc();
+function matchFilter(u, f = S.filters) {
+  if (f.min && (u.compat?.score ?? 0) < +f.min) return false;
+  if (f.uni && u.university !== f.uni) return false;
+  if (f.area && !(u.area || '').toLowerCase().includes(f.area.toLowerCase())) return false;
+  if (f.house && u.house_type !== f.house) return false;
+  if (f.prio && u.priority !== f.prio) return false;
+  if (f.bud && BUDS[f.bud]) {
+    const [, blo, bhi] = BUDS[f.bud];
+    if (u.budget_max < blo || u.budget_max > bhi) return false;
+  }
+  if (f.tag && !(u.tags || []).includes(f.tag)) return false;
+  if (f.sleep === 'early' && (u.habits?.sleep ?? 3) > 2) return false;
+  if (f.sleep === 'late' && (u.habits?.sleep ?? 3) < 4) return false;
+  if (f.tidy === 'high' && (u.habits?.tidy ?? 3) < 4) return false;
+  if (f.photo === '1' && !u.photo) return false;
+  return true;
+}
+function applyFilterInstant(newFilters, resetPass = true) {
+  S.filters = { ...FDEF, ...newFilters };
+  if (resetPass) {
+    S.passedIds.clear();
+    S.passedCount = 0;
+    S.history = S.history.filter(x => x.kind !== 'pass');
+  }
+  if (S.pool.length) {
+    S.deck = S.pool.filter(u => !S.swipedIds.has(u.id) && !S.passedIds.has(u.id) && matchFilter(u, S.filters));
+    S.loaded = true;
+    renderDisc(false);
+    swipeChain = swipeChain.then(() => loadDeck(resetPass)).then(() => {
+      if (S.tab === 'disc' && !topCard() && S.deck.length) drawDeck();
+    }).catch(() => {});
+  } else {
+    S.loaded = false;
+    swipeChain = swipeChain.then(() => renderDisc(resetPass)).catch(() => {});
+  }
+}
+function resetPassed() {
+  applyFilterInstant(S.filters, true);
 }
 const FDEF = { min: 0, uni: '', area: '', house: '', prio: '', bud: '', tag: '', sleep: '', tidy: '', photo: '' };
 const BUDS = { a: ['Dưới 3 triệu', 0, 3], b: ['3 – 4 triệu', 3, 4], c: ['4 – 5 triệu', 4, 5], d: ['Trên 5 triệu', 5, 99] };
@@ -472,8 +517,8 @@ function openFilters() {
     const k = g.dataset.g, v = b.dataset.v; F[k] = F[k] === v ? '' : v;
     g.querySelectorAll('.fchip').forEach(x => x.classList.toggle('sel', x.dataset.v === F[k]));
   }));
-  $('#f_clear').onclick = () => { S.filters = { ...FDEF }; S.history = S.history.filter(x => x.kind !== 'pass'); S.loaded = false; closeSheet(); renderDisc(true); };
-  $('#f_ok').onclick = () => { S.filters = F; S.history = S.history.filter(x => x.kind !== 'pass'); S.loaded = false; closeSheet(); renderDisc(true); };
+  $('#f_clear').onclick = () => { closeSheet(); applyFilterInstant(FDEF, true); };
+  $('#f_ok').onclick = () => { closeSheet(); applyFilterInstant(F, true); };
 }
 function openDetail(u, actions = true) {
   if (!u) return; const cp = u.compat;
@@ -533,7 +578,7 @@ async function openChat(id) {
   const mt = S.matches.find(m => m.id === id) || (await api('matches')).matches.find(m => m.id === id); if (!mt) return;
   const page = document.createElement('div'); page.className = 'page'; page.id = 'chatpage';
   page.innerHTML = `<div class="page-h"><button class="back" id="c_back">←</button>${av(mt.user, 42)}<div style="flex:1;min-width:0"><b>${esc(mt.user.name)}</b><div class="mu" id="c_sub">${esc(mt.user.university)}</div></div><button class="icon-btn" id="c_more">⋯</button></div>
-  <div class="msgs" id="msgs"></div><div class="ice" id="ice">${ICEBREAK.map(t => `<button>${t}</button>`).join('')}</div>
+  <div class="msgs" id="msgs"><div class="spin"></div></div><div class="ice" id="ice">${ICEBREAK.map(t => `<button>${t}</button>`).join('')}</div>
   <div class="composer"><input class="input" id="c_in" placeholder="Nhập tin nhắn…" maxlength="1000" autocomplete="off"><button class="send" id="c_send">➤</button></div>`;
   $('#overlay').appendChild(page);
   let last = 0, chatBusy = false, chatPromise = null;
@@ -553,6 +598,7 @@ async function openChat(id) {
         const d = await api(`matches/${id}/messages?after=${last}`);
         if (!$('#msgs')) return;
         const wasBottom = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80;
+        msgs.querySelector('.spin')?.remove();
         msgs.querySelector('.typing')?.remove();
         if (d.messages.length) msgs.querySelectorAll('.msg.pending.sent').forEach(x => x.remove());
         let added = false;

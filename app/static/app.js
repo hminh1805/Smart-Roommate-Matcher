@@ -2,6 +2,7 @@
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = n => Number(n).toLocaleString('vi-VN') + 'đ';
+const shortVnd = n => n >= 1e6 ? (Math.round(n / 1e5) / 10) + 'tr' : Math.round(n / 1e3) + 'k';
 const HAB = [
   { k: 'sleep', ic: '🌙', l: 'Giờ giấc', a: 'Dậy sớm', b: 'Cú đêm' },
   { k: 'tidy', ic: '🧹', l: 'Gọn gàng', a: 'Thoải mái', b: 'Rất sạch' },
@@ -54,7 +55,7 @@ function closeSheet() { $('#sheet-wrap').classList.remove('show'); }
 $('.scrim').onclick = closeSheet;
 function timeStr(t) { const d = new Date(t * 1000); return d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0'); }
 function confetti(n = 60) {
-  const cols = ['#F2603A', '#F6B73C', '#2C7A69', '#F29BB5', '#8EC5F2', '#fff'];
+  const cols = ['#2BD46A', '#FF8A1F', '#FFC83D', '#3DB2FF', '#9B6BFF', '#FF4D6D', '#FFFFFF'];
   const app = $('#app');
   for (let i = 0; i < n; i++) {
     const c = document.createElement('i'); c.className = 'confetti';
@@ -255,7 +256,7 @@ function cardHTML(u, pos) {
     <div class="pc-body">
       <h3>${esc(u.name)} <span>${u.age}</span></h3>
       <div class="pc-meta">🎓 ${esc(u.university || 'Chưa cập nhật')}${u.area ? ' · 📍 ' + esc(u.area) : ''}</div>
-      <div>${[`💰 Tối đa ${u.budget_max} tr`, (HOUSES.find(h => h[0] === u.house_type) || [])[1] + ' ' + HNAME[u.house_type], '⭐ ' + PNAME[u.priority]].map(t => `<span class="chip" style="background:var(--moss);color:#fff">${esc(t)}</span>`).join('')}</div>
+      <div>${[[`💰 Tối đa ${u.budget_max} tr`, 'coin'], [(HOUSES.find(h => h[0] === u.house_type) || [])[1] + ' ' + HNAME[u.house_type], 'sky'], ['⭐ ' + PNAME[u.priority], 'grape']].map(([t, cls]) => `<span class="chip ${cls}">${esc(t)}</span>`).join('')}</div>
       <div>${u.tags.slice(0, 2).map(t => `<span class="chip${cp.shared_tags.includes(t) ? ' ok' : ''}">${esc(t)}</span>`).join('')}</div>
       <div class="pc-bio">${esc(u.bio)}</div>
       <div class="minis">${cp.habits.map(h => `<div class="mini">${HAB.find(x => x.k === h.key).ic}<small style="color:var(--mu)">${SHORT[h.key]}</small><small style="color:${scoreColor(h.sim)}">${verdict(h.sim)}</small><i style="width:${h.sim}%;background:${scoreColor(h.sim)}"></i></div>`).join('')}</div>
@@ -422,17 +423,17 @@ function openDetail(u, actions = true) {
 function showMatch(m) {
   const me = S.user, u = m.user;
   const el = document.createElement('div'); el.className = 'matchov';
-  el.innerHTML = `<div style="text-align:center;font-weight:700;letter-spacing:2px;font-size:12px;opacity:.8;margin-top:10px">${level(m.score).toUpperCase()} · ${m.score}%</div><h1>Hợp cạ rồi!</h1>
+  el.innerHTML = `<div style="text-align:center"><span class="match-pill">⭐ ${level(m.score).toUpperCase()} · ${m.score}%</span></div><h1>Hợp cạ rồi!</h1>
   <div class="pair">${av(me, 96)}<div class="heart">💚</div>${av(u, 96)}</div>
-  <p style="text-align:center;opacity:.9;font-size:14px;line-height:1.5;margin-bottom:8px">Bạn và <b>${esc(u.name)}</b> đã thích nhau.<br>${esc(u.compat.insights[0] || 'Hãy nhắn tin làm quen nhé!')}</p>
-  <div style="font-weight:700;margin:12px 0 4px">🏘️ Gợi ý phòng cho hai bạn</div>
-  <div class="rscroll">${(m.rooms || []).map(r => `<div class="rcard">${r.sponsored ? '<span class="chip ad">Tài trợ</span>' : ''}${r.near_you ? '<span class="chip ok">Gần trường</span>' : ''}
-    <div style="font-weight:700;margin:4px 0">${r.emoji} ${esc(r.name)}</div><div class="mu">📍 ${esc(r.district)} · ${r.dist}</div>
+  <p style="text-align:center;opacity:.92;font-size:14px;font-weight:700;line-height:1.5;margin-bottom:8px">Bạn và <b>${esc(u.name)}</b> đã thích nhau.<br>${esc(u.compat.insights[0] || 'Hãy nhắn tin làm quen nhé!')}</p>
+  <div style="font-weight:800;margin:10px 0 4px">🏘️ Gợi ý phòng cho hai bạn</div>
+  <div class="rscroll">${(m.rooms || []).map(r => `<div class="rcard"><div>${r.sponsored ? '<span class="chip ad">Tài trợ</span>' : ''}${r.near_you ? '<span class="chip ok">Gần trường</span>' : ''}</div>
+    <div style="font-weight:800;margin:4px 0;font-size:14.5px">${r.emoji} ${esc(r.name)}</div><div class="mu">📍 ${esc(r.district)} · ${r.dist}</div>
     <div class="price" style="margin:6px 0 2px">${fmt(r.price)}<span class="mu">/tháng</span></div><div class="mu">≈ ${fmt(Math.round(r.price / 2))}/người</div>
-    <button class="btn sm coral" style="width:100%;margin-top:10px" data-room="${r.id}">Đặt lịch xem</button></div>`).join('')}</div>
+    <button class="btn sm coral" style="width:100%;margin-top:auto;padding-top:8px" data-room="${r.id}">Đặt lịch xem</button></div>`).join('')}</div>
   <div style="flex:1"></div>
-  <button class="btn coral" id="m_chat">💬 Nhắn tin cho ${esc(u.name.split(' ').pop())}</button>
-  <button class="btn ghost" id="m_go" style="margin-top:10px;color:#fff;border-color:rgba(255,255,255,.4)">Tiếp tục quẹt</button>`;
+  <button class="btn" id="m_chat">💬 Nhắn tin cho ${esc(u.name.split(' ').pop())}</button>
+  <button class="btn ghost" id="m_go" style="margin-top:10px;background:rgba(255,255,255,.12);color:#fff;border-color:rgba(255,255,255,.55);box-shadow:0 3px 0 rgba(0,0,0,.35)">Tiếp tục quẹt</button>`;
   $('#overlay').appendChild(el); confetti(80);
   el.querySelectorAll('[data-room]').forEach(b => b.onclick = () => bookSheet('room', m.rooms.find(r => r.id == b.dataset.room)));
   $('#m_go').onclick = () => { el.remove(); if (S.tab === 'disc') drawDeck(); };
@@ -558,14 +559,18 @@ async function showRoomsFor(id) {
 
 /* ---------- services ---------- */
 function roomCard(r) {
-  return `<div class="card"><div class="svc"><div class="ic">${r.emoji}</div><div style="flex:1;min-width:0"><div>${r.sponsored ? '<span class="chip ad">Tài trợ</span>' : ''}${r.near_you ? '<span class="chip ok">Gần trường bạn</span>' : ''}</div>
-  <b>${esc(r.name)}</b><div class="mu">📍 ${esc(r.district)} · cách trường ${r.dist} · ${esc(r.owner)}</div></div></div>
-  <p class="mu" style="margin:8px 0">${esc(r.desc)}</p><div>${r.amenities.map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div>
-  <div class="row" style="margin-top:6px"><div class="grow"><div class="price">${fmt(r.price)}<span class="mu">/tháng</span></div><div class="mu">≈ ${fmt(Math.round(r.price / 2))}/người${r.fits === false ? ' · ⚠️ vượt ngân sách' : ''}</div></div><button class="btn sm coral" data-book="${r.id}">Đặt lịch xem</button></div></div>`;
+  return `<div class="ticket"><div class="tk-left ${r.sponsored ? 'tk-coin' : 'tk-grape'}"><div class="tk-ic">${r.emoji}</div><div class="tk-val">${shortVnd(Math.round(r.price / 2))}</div><div class="tk-unit">/người</div></div>
+  <div class="tk-right"><div>${r.sponsored ? '<span class="chip ad">Tài trợ</span>' : ''}${r.near_you ? '<span class="chip ok">Gần trường</span>' : ''}</div>
+  <div class="tk-title">${esc(r.name)}</div><div class="mu">📍 ${esc(r.district)} · cách trường ${r.dist} · ${esc(r.owner)}</div>
+  <p class="mu" style="margin:2px 0">${esc(r.desc)}</p><div>${r.amenities.map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div>
+  <div class="row" style="margin-top:4px"><div class="grow"><div class="price">${fmt(r.price)}<span class="mu">/tháng</span></div>${r.fits === false ? '<div class="mu" style="color:var(--red7)">⚠️ Vượt ngân sách</div>' : ''}</div><button class="btn sm coral" data-book="${r.id}">Đặt lịch xem</button></div></div></div>`;
 }
 function svcCard(s) {
-  return `<div class="card"><div class="svc"><div class="ic">${s.emoji}</div><div style="flex:1;min-width:0">${s.promoted ? '<span class="chip ad">Ưu tiên hiển thị</span>' : ''}<div><b>${esc(s.name)}</b></div><div class="stars">★ ${s.rating} <span class="mu">· ${s.jobs} lượt</span></div></div></div>
-  <p class="mu" style="margin:8px 0">${esc(s.desc)}</p><div class="row"><div class="grow price">${s.unit === 'từ' ? 'Từ ' : ''}${fmt(s.price)}<span class="mu">${s.unit === 'từ' ? '' : '/' + s.unit}</span></div><button class="btn sm" data-book="${s.id}">Đặt ngay</button></div></div>`;
+  const k = s.kind || S.svc;
+  const tone = k === 'truck' ? 'tk-orange' : k === 'clean' ? 'tk-sky' : 'tk-green';
+  return `<div class="ticket"><div class="tk-left ${tone}"><div class="tk-ic">${s.emoji}</div><div class="tk-val">${shortVnd(s.price)}</div><div class="tk-unit">${s.unit === 'từ' ? 'giá từ' : '/' + esc(s.unit)}</div></div>
+  <div class="tk-right">${s.promoted ? '<div><span class="chip ad">Ưu tiên hiển thị</span></div>' : ''}<div class="tk-title">${esc(s.name)}</div><div class="stars">★ ${s.rating} <span class="mu">· ${s.jobs} lượt</span></div>
+  <p class="mu" style="margin:2px 0">${esc(s.desc)}</p><div class="row" style="margin-top:4px"><div class="grow price">${s.unit === 'từ' ? 'Từ ' : ''}${fmt(s.price)}<span class="mu">${s.unit === 'từ' ? '' : '/' + s.unit}</span></div><button class="btn sm" data-book="${s.id}">Đặt ngay</button></div></div></div>`;
 }
 function bindBook(items, kind) {
   document.querySelectorAll('[data-book]').forEach(b => b.onclick = () => { const it = items.find(x => x.id == b.dataset.book); bookSheet(it.kind || kind, it); });
@@ -607,21 +612,21 @@ function bookSheet(kind, it) {
 function radar(h) {
   const n = HAB.length, R = 72, cx = 110, cy = 108;
   const pt = (i, v) => { const a = -Math.PI / 2 + i * 2 * Math.PI / n; return [cx + Math.cos(a) * R * v / 5, cy + Math.sin(a) * R * v / 5]; };
-  const grid = [1, 2, 3, 4, 5].map(v => `<polygon points="${HAB.map((_, i) => pt(i, v).join(',')).join(' ')}" fill="none" stroke="var(--line)"/>`).join('');
+  const grid = [1, 2, 3, 4, 5].map(v => `<polygon points="${HAB.map((_, i) => pt(i, v).join(',')).join(' ')}" fill="none" stroke="#D5C4A1" stroke-width="1.5"/>`).join('');
   const poly = HAB.map((x, i) => pt(i, h[x.k]).join(',')).join(' ');
   const labels = HAB.map((x, i) => { const [px, py] = pt(i, 6.2); return `<text x="${px}" y="${py + 5}" text-anchor="middle" font-size="15">${x.ic}</text>`; }).join('');
-  return `<svg viewBox="0 0 220 205" style="width:100%;max-width:260px;display:block;margin:auto">${grid}<polygon points="${poly}" fill="rgba(242,96,58,.25)" stroke="var(--coral)" stroke-width="2.5" stroke-linejoin="round"/>${HAB.map((x, i) => { const [px, py] = pt(i, h[x.k]); return `<circle cx="${px}" cy="${py}" r="4" fill="var(--coral)"/>`; }).join('')}${labels}</svg>`;
+  return `<svg viewBox="0 0 220 205" style="width:100%;max-width:260px;display:block;margin:auto">${grid}<polygon points="${poly}" fill="rgba(43,212,106,.32)" stroke="#1B1A3A" stroke-width="2.5" stroke-linejoin="round"/>${HAB.map((x, i) => { const [px, py] = pt(i, h[x.k]); return `<circle cx="${px}" cy="${py}" r="4.5" fill="#FF8A1F" stroke="#1B1A3A" stroke-width="1.8"/>`; }).join('')}${labels}</svg>`;
 }
 function drawMe() {
   const u = S.user; if (!u || S.tab !== 'me') return;
   $('#main').innerHTML = `<div class="view" style="padding-top:14px">
-  <div class="phero c${u.color}">${avBig(u, 96)}<h2>${esc(u.name)}, ${u.age}</h2><div style="font-size:13px;opacity:.9">🎓 ${esc(u.university || 'Chưa chọn trường')} · 📍 ${esc(u.area || '—')}</div>
-  ${u.guest ? '<div style="margin-top:8px;font-size:12px;background:rgba(0,0,0,.2);border-radius:10px;padding:6px 10px;display:inline-block">Tài khoản dùng thử</div>' : ''}</div>
+  <div class="phero c${u.color}">${avBig(u, 96)}<h2>${esc(u.name)}, ${u.age}</h2><div style="font-size:13px;font-weight:700;opacity:.92">🎓 ${esc(u.university || 'Chưa chọn trường')} · 📍 ${esc(u.area || '—')}</div>
+  ${u.guest ? '<div style="margin-top:8px;font-size:12px;font-weight:800;background:rgba(27,26,58,.45);border:2px solid rgba(255,255,255,.7);border-radius:999px;padding:5px 12px;display:inline-block">Tài khoản dùng thử</div>' : ''}</div>
   <div class="statrow"><div class="stat"><b>${u.counts.swiped}</b><span>Đã quẹt</span></div><div class="stat"><b>${u.counts.matches}</b><span>Match</span></div><div class="stat"><b>${u.liked_me}</b><span>Thích bạn</span></div></div>
   <div class="card"><b>Chân dung sinh hoạt</b>${radar(u.habits)}<div style="margin-top:6px">${u.tags.map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div><p class="mu" style="margin-top:6px">💰 Tiền thuê tối đa ${u.budget_max} triệu/người/tháng · ${HNAME[u.house_type]} · ưu tiên ${PNAME[u.priority].toLowerCase()}</p></div>
   <button class="btn" onclick="S.onb=null;onboarding(false,0)">✏️ Chỉnh sửa hồ sơ & thói quen</button>
   <button class="btn ghost" style="margin-top:10px" onclick="openOrders()">🧾 Đơn của tôi (${u.counts.orders})</button>
-  <button class="btn ghost" style="margin-top:10px" onclick="openPartner()">📊 Bảng điều khiển đối tác (B2B)</button>
+  <button class="btn grape" style="margin-top:10px" onclick="openPartner()">📊 Bảng điều khiển đối tác (B2B)</button>
   <button class="btn ghost" style="margin-top:10px;color:var(--bad)" onclick="logout()">Đăng xuất</button><div style="height:10px"></div></div>`;
 }
 async function renderMe() {

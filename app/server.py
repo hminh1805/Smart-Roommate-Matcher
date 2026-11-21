@@ -3,8 +3,10 @@
 
 Chạy:  python server.py   ->  http://localhost:8000
 """
+import csv
 import gzip
 import hashlib
+import io
 import json
 import mimetypes
 import os
@@ -16,6 +18,7 @@ import sqlite3
 import sys
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -215,6 +218,13 @@ CREATE TABLE IF NOT EXISTS rooms(id INTEGER PRIMARY KEY, name TEXT, price INTEGE
 CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY, kind TEXT, name TEXT, price INTEGER, unit TEXT, descr TEXT, rating REAL, jobs INTEGER, emoji TEXT, promoted INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, kind TEXT, item_id INTEGER, item_name TEXT, amount INTEGER, commission INTEGER, note TEXT, date TEXT, status TEXT DEFAULT 'new', created REAL);
 CREATE TABLE IF NOT EXISTS impressions(id INTEGER PRIMARY KEY AUTOINCREMENT, room_id INTEGER, user_id INTEGER, created REAL);
+CREATE TABLE IF NOT EXISTS feedback(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, tester_name TEXT DEFAULT 'Ẩn danh',
+  device TEXT DEFAULT 'mobile', r_ui INTEGER DEFAULT 5, r_ux INTEGER DEFAULT 5,
+  r_match INTEGER DEFAULT 5, r_eco INTEGER DEFAULT 5, r_overall INTEGER DEFAULT 5,
+  fav_features TEXT DEFAULT '[]', issue_type TEXT DEFAULT 'smooth',
+  shark_invest TEXT DEFAULT 'explore', suggestion TEXT DEFAULT '', created REAL);
+CREATE INDEX IF NOT EXISTS ix_feedback_created ON feedback(created);
 CREATE INDEX IF NOT EXISTS ix_msg ON messages(match_id,id);
 CREATE INDEX IF NOT EXISTS ix_swipes_to ON swipes(to_id,from_id);
 CREATE INDEX IF NOT EXISTS ix_swipes_from_kind ON swipes(from_id,kind,created);
@@ -700,6 +710,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/health" and method in ("GET", "HEAD"):
                 self.send_json({"ok": True}, head_only=(method == "HEAD"))
                 return
+            if path == "/api/feedback.csv" and method == "GET":
+                self.feedback_csv()
+                return
             if path.startswith("/api/"):
                 res = None
                 for attempt in (0, 1):
@@ -807,6 +820,11 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": True}
         if path == "stats" and method == "GET":
             return self.stats(c)
+        if path == "feedback":
+            if method == "GET":
+                return self.feedback_stats(c)
+            if method == "POST":
+                return self.submit_feedback(c, self.body())
         if path in ("register", "login", "guest") and method == "POST":
             return self.do_auth(c, path)
 
@@ -1147,6 +1165,151 @@ class Handler(BaseHTTPRequestHandler):
             "sponsor_revenue": imps * 2000,  # giả định 2.000đ / lượt hiển thị
             "by_kind": by_kind, "top_rooms": top_rooms,
         }
+
+    def opt_auth(self, c):
+        try:
+            return self.auth(c)
+        except Err:
+            return None
+
+    def submit_feedback(self, c, b):
+        me = self.opt_auth(c)
+        uid = me["id"] if me else 0
+        default_name = (me["name"] if me and me["name"] != "Bạn mới" else "")
+        tester_name = clean_text(b.get("tester_name"), 40) or default_name or "Ẩn danh"
+        device = b.get("device") if b.get("device") in ("mobile", "desktop", "both") else "mobile"
+        scores = {}
+        for k in ("r_ui", "r_ux", "r_match", "r_eco", "r_overall"):
+            raw = b.get(k)
+            if raw is None or isinstance(raw, bool):
+                raise Err(400, "Vui lòng chọn điểm đánh giá từ 1 đến 5 sao")
+            try:
+                v = int(raw)
+            except (TypeError, ValueError):
+                raise Err(400, "Điểm đánh giá không hợp lệ")
+            scores[k] = max(1, min(5, v))
+        raw_fav = b.get("fav_features")
+        favs = []
+        if isinstance(raw_fav, list):
+            for x in raw_fav[:7]:
+                s = clean_text(x, 60)
+                if s and s not in favs:
+                    favs.append(s)
+        issue = b.get("issue_type") if b.get("issue_type") in ("smooth", "lag", "ui_bug", "func_bug") else "smooth"
+        shark = b.get("shark_invest") if b.get("shark_invest") in ("strong", "explore", "consider", "no") else "explore"
+        suggestion = clean_text(b.get("suggestion"), 600)
+        fid = c.insert_id(
+            "INSERT INTO feedback(user_id,tester_name,device,r_ui,r_ux,r_match,r_eco,r_overall,fav_features,issue_type,shark_invest,suggestion,created)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (uid, tester_name, device, scores["r_ui"], scores["r_ux"], scores["r_match"], scores["r_eco"], scores["r_overall"],
+             json.dumps(favs, ensure_ascii=False), issue, shark, suggestion, time.time()),
+        )
+        return {"ok": True, "id": fid}
+
+    def _feedback_rows(self, c):
+        return c.execute("SELECT * FROM feedback ORDER BY id DESC").fetchall()
+
+    def feedback_stats(self, c):
+        rows = self._feedback_rows(c)
+        n = len(rows)
+        by_dev = {"mobile": 0, "desktop": 0, "both": 0}
+        by_iss = {"smooth": 0, "lag": 0, "ui_bug": 0, "func_bug": 0}
+        by_shk = {"strong": 0, "explore": 0, "consider": 0, "no": 0}
+        sums = {"r_ui": 0, "r_ux": 0, "r_match": 0, "r_eco": 0, "r_overall": 0}
+        feat_cnt = {}
+        items = []
+        for idx, r in enumerate(rows):
+            if r["device"] in by_dev:
+                by_dev[r["device"]] += 1
+            if r["issue_type"] in by_iss:
+                by_iss[r["issue_type"]] += 1
+            if r["shark_invest"] in by_shk:
+                by_shk[r["shark_invest"]] += 1
+            for k in sums:
+                sums[k] += int(r[k] or 0)
+            favs = json.loads(r["fav_features"] or "[]")
+            for f in favs:
+                feat_cnt[f] = feat_cnt.get(f, 0) + 1
+            if idx < 80:
+                items.append({
+                    "id": r["id"],
+                    "tester_name": r["tester_name"],
+                    "device": r["device"],
+                    "r_ui": int(r["r_ui"] or 0),
+                    "r_ux": int(r["r_ux"] or 0),
+                    "r_match": int(r["r_match"] or 0),
+                    "r_eco": int(r["r_eco"] or 0),
+                    "r_overall": int(r["r_overall"] or 0),
+                    "fav_features": favs,
+                    "issue_type": r["issue_type"],
+                    "shark_invest": r["shark_invest"],
+                    "suggestion": r["suggestion"] or "",
+                    "created": r["created"],
+                })
+        avg = {
+            "ui": round(sums["r_ui"] / n, 2) if n else 0,
+            "ux": round(sums["r_ux"] / n, 2) if n else 0,
+            "match": round(sums["r_match"] / n, 2) if n else 0,
+            "eco": round(sums["r_eco"] / n, 2) if n else 0,
+            "overall": round(sums["r_overall"] / n, 2) if n else 0,
+        }
+        top_features = [{"name": k, "count": v} for k, v in sorted(feat_cnt.items(), key=lambda x: (-x[1], x[0]))]
+        return {
+            "total": n,
+            "averages": avg,
+            "by_device": by_dev,
+            "by_issue": by_iss,
+            "by_shark": by_shk,
+            "invest_ready_pct": round((by_shk["strong"] + by_shk["explore"]) * 100 / n) if n else 0,
+            "smooth_pct": round(by_iss["smooth"] * 100 / n) if n else 0,
+            "top_features": top_features,
+            "items": items,
+        }
+
+    def feedback_csv(self):
+        rows = []
+        for attempt in (0, 1):
+            c = db()
+            try:
+                rows = self._feedback_rows(c)
+                break
+            except Exception as e:
+                if IS_PG and isinstance(e, (psycopg.OperationalError, psycopg.InterfaceError)):
+                    c.discard()
+                    if attempt == 0:
+                        continue
+                raise
+            finally:
+                c.close()
+        dev_map = {"mobile": "Điện thoại", "desktop": "Laptop / Máy tính bảng", "both": "Cả hai"}
+        iss_map = {"smooth": "Chạy rất mượt", "lag": "Hơi lag nhẹ", "ui_bug": "Lỗi hiển thị", "func_bug": "Lỗi chức năng"}
+        shk_map = {"strong": "Đầu tư mạnh (≥3 tỷ)", "explore": "Thăm dò (1-2 tỷ)", "consider": "Cân nhắc thêm", "no": "Chưa đầu tư"}
+        tz = timezone(timedelta(hours=7))
+        safe_cell = lambda s: ("'" + s) if s and s[0] in ("=", "+", "-", "@") else s
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["ID", "Thời gian (UTC+7)", "Người đánh giá", "Thiết bị", "Điểm UI", "Điểm UX",
+                    "Chấm 5 thói quen", "Hệ sinh thái", "Tổng thể", "Tính năng thích",
+                    "Trải nghiệm kỹ thuật", "Mức độ đầu tư (10 tỷ ảo)", "Đề xuất & Cải tiến"])
+        for r in rows:
+            ts = datetime.fromtimestamp(float(r["created"] or 0), tz).strftime("%Y-%m-%d %H:%M") if r["created"] else ""
+            favs = ", ".join(json.loads(r["fav_features"] or "[]"))
+            w.writerow([
+                r["id"], ts, safe_cell(r["tester_name"] or ""),
+                dev_map.get(r["device"], r["device"]),
+                r["r_ui"], r["r_ux"], r["r_match"], r["r_eco"], r["r_overall"],
+                favs, iss_map.get(r["issue_type"], r["issue_type"]),
+                shk_map.get(r["shark_invest"], r["shark_invest"]),
+                safe_cell(r["suggestion"] or ""),
+            ])
+        data = ("\ufeff" + buf.getvalue()).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", 'attachment; filename="smart-roommate-feedback.csv"')
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
 
 
 def main():

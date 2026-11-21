@@ -18,8 +18,13 @@ const HOUSES = [['tro', '🏠', 'Phòng trọ', 'Rẻ, đơn giản'], ['mini', 
 const PRIOS = [['cheap', '💸', 'Giá rẻ', 'Tiết kiệm nhất'], ['near', '📍', 'Gần trường', 'Đi bộ được'], ['quality', '✨', 'Sạch đẹp', 'Tiện nghi tốt']];
 const HNAME = Object.fromEntries(HOUSES.map(h => [h[0], h[2]])), PNAME = Object.fromEntries(PRIOS.map(p => [p[0], p[2]]));
 const SVC = [['room', '🏘️', 'Phòng trọ'], ['truck', '🚚', 'Xe chuyển'], ['clean', '🧽', 'Dọn dẹp'], ['used', '🛋️', 'Đồ cũ']];
+const FB_CRIT = [['r_ui', 'Giao diện & Bố cục (UI)'], ['r_ux', 'Độ mượt & Dễ dùng (UX)'], ['r_match', 'Chấm điểm 5 thói quen'], ['r_eco', 'Hệ sinh thái (Trọ · Xe · Dọn)'], ['r_overall', 'Hài lòng tổng thể']];
+const FB_FEATS = ['Quẹt kiểu Tinder mượt mà', 'Chấm % & 5 ô thói quen', 'Bộ lọc 10 nhóm + Ảnh thật', 'Match + Gợi ý phòng trọ', 'Chat + Gợi ý mở lời', 'Xe chuyển · Dọn dẹp · Đồ cũ', 'Miễn phí 0đ sinh viên'];
+const FB_DEV = [['mobile', '📱 Điện thoại'], ['desktop', '💻 Laptop / PC'], ['both', '📱💻 Cả hai']];
+const FB_ISS = [['smooth', '✅ Chạy rất mượt'], ['lag', '🐢 Hơi lag nhẹ'], ['ui_bug', '🎨 Lỗi hiển thị'], ['func_bug', '⚙️ Lỗi chức năng']];
+const FB_SHARK = [['strong', '💰 Đầu tư mạnh (≥3 tỷ)'], ['explore', '💡 Thăm dò (1–2 tỷ)'], ['consider', '🤔 Cân nhắc thêm'], ['no', '⏸️ Chưa đầu tư']];
 
-const S = { token: localStorage.getItem('rm_token'), user: null, tab: 'disc', deck: [], unis: [], filters: { min: 0, uni: '', area: '', house: '', prio: '', bud: '', tag: '', sleep: '', tidy: '', photo: '' }, last: null, busy: false, matches: [], matchesLoaded: false, unread: 0, svc: 'room', svcCache: {}, onb: null, loaded: false };
+const S = { token: localStorage.getItem('rm_token'), user: null, tab: 'disc', deck: [], unis: [], filters: { min: 0, uni: '', area: '', house: '', prio: '', bud: '', tag: '', sleep: '', tidy: '', photo: '' }, last: null, busy: false, matches: [], matchesLoaded: false, unread: 0, svc: 'room', svcCache: {}, onb: null, fb: null, loaded: false };
 let chatTimer = null, pollTimer = null, pollBusy = false;
 
 /* ---------- helpers ---------- */
@@ -72,9 +77,15 @@ const ICONS = {
 };
 
 /* ---------- boot / auth ---------- */
+function checkHash() {
+  if (location.hash === '#feedback') openFeedback('form');
+  else if (location.hash === '#stats') openFeedback('stats');
+}
+window.addEventListener('hashchange', checkHash);
 async function boot() {
   if (S.token) { try { S.user = (await api('me')).user; } catch (e) { S.token = null; } }
   route();
+  checkHash();
 }
 function logout(silent) {
   if (!silent && S.token) api('logout', 'POST').catch(() => { });
@@ -99,7 +110,8 @@ function authScreen(mode) {
     <div class="field"><label>Mật khẩu</label><input class="input" id="a_pw" type="password" placeholder="Tối thiểu 6 ký tự" autocomplete="${reg ? 'new-password' : 'current-password'}"></div>
     <div class="err" id="a_err"></div>
     <button class="btn" id="a_go">${reg ? 'Tạo tài khoản' : 'Đăng nhập'}</button>
-    <button class="btn ghost" style="margin-top:10px" id="a_guest">⚡ Dùng thử ngay, không cần đăng ký</button>
+    <button class="btn ghost" style="margin-top:8px" id="a_guest">⚡ Dùng thử ngay, không cần đăng ký</button>
+    <button class="btn sm ghost" style="margin-top:8px;align-self:center" onclick="openFeedback('form')">⭐ Đánh giá nhanh bản Demo</button>
   </div>`;
   const go = async (kind, body, btn) => {
     $('#a_err').textContent = '';
@@ -235,7 +247,7 @@ async function loadDeck() {
   d.candidates.slice(0, 4).forEach(u => { if (u.photo) { const im = new Image(); im.src = u.photo; } });
 }
 async function renderDisc() {
-  $('#main').innerHTML = `<div class="topbar"><div class="logo">🏠 Smart Roommate</div><div class="row" style="gap:8px"><button class="filter-btn" onclick="openFilters()">${FUNNEL}Bộ lọc${filterActive() ? `<span class="fb">${filterActive()}</span>` : ''}</button></div></div>
+  $('#main').innerHTML = `<div class="topbar"><div class="logo">🏠 Smart Roommate</div><div class="row" style="gap:6px;flex:none"><button class="filter-btn fb-btn" onclick="openFeedback('form')">⭐ Góp ý</button><button class="filter-btn" onclick="openFilters()">${FUNNEL}Bộ lọc${filterActive() ? `<span class="fb">${filterActive()}</span>` : ''}</button></div></div>
   <div class="dwrap"><div class="deck" id="deck"><div class="spin"></div></div><div class="acts" id="acts"></div></div>`;
   if (!S.loaded) { try { await loadDeck(); } catch (e) { return toast(e.message); } }
   drawDeck();
@@ -626,6 +638,7 @@ function drawMe() {
   <div class="card"><b>Chân dung sinh hoạt</b>${radar(u.habits)}<div style="margin-top:6px">${u.tags.map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div><p class="mu" style="margin-top:6px">💰 Tiền thuê tối đa ${u.budget_max} triệu/người/tháng · ${HNAME[u.house_type]} · ưu tiên ${PNAME[u.priority].toLowerCase()}</p></div>
   <button class="btn" onclick="S.onb=null;onboarding(false,0)">✏️ Chỉnh sửa hồ sơ & thói quen</button>
   <button class="btn ghost" style="margin-top:10px" onclick="openOrders()">🧾 Đơn của tôi (${u.counts.orders})</button>
+  <button class="btn coin" style="margin-top:10px" onclick="openFeedback('form')">📝 Đánh giá & Thống kê khảo sát</button>
   <button class="btn grape" style="margin-top:10px" onclick="openPartner()">📊 Bảng điều khiển đối tác (B2B)</button>
   <button class="btn ghost" style="margin-top:10px;color:var(--bad)" onclick="logout()">Đăng xuất</button><div style="height:10px"></div></div>`;
 }
@@ -659,5 +672,89 @@ async function openPartner() {
     <h3 class="t">Phòng được xem nhiều nhất</h3>${s.top_rooms.map(r => `<div class="ordr"><span>${esc(r.name)}</span><b>${r.views} lượt</b></div>`).join('') || '<p class="mu">Chưa có dữ liệu.</p>'}
     <h3 class="t">Doanh thu ước tính</h3><div class="card" style="text-align:center"><div class="price" style="font-size:28px">${fmt(s.sponsor_revenue + s.commission)}</div><div class="mu">Phí hiển thị + hoa hồng</div></div>`;
   } catch (e) { closeSheet(); toast(e.message); }
+}
+
+async function openFeedback(tab = 'form') {
+  if (!S.fb) S.fb = {
+    tester_name: S.user && S.user.name && S.user.name !== 'Bạn mới' ? S.user.name : '',
+    device: window.innerWidth < 520 ? 'mobile' : 'desktop',
+    r_ui: 5, r_ux: 5, r_match: 5, r_eco: 5, r_overall: 5,
+    fav_features: [], issue_type: 'smooth', shark_invest: 'explore', suggestion: '',
+  };
+  const header = `<div class="row" style="margin-bottom:8px"><h2 class="t" style="flex:1">Đánh giá trải nghiệm</h2><button class="btn sm ghost" onclick="closeSheet()">✕</button></div>
+  <div class="seg" style="margin-bottom:12px"><button class="${tab === 'form' ? 'on' : ''}" data-fbt="form">📝 Gửi đánh giá</button><button class="${tab === 'stats' ? 'on' : ''}" data-fbt="stats">📊 Thống kê</button></div>`;
+  const bindTabs = () => document.querySelectorAll('[data-fbt]').forEach(b => b.onclick = () => {
+    if ($('#fb_name')) S.fb.tester_name = $('#fb_name').value;
+    if ($('#fb_sug')) S.fb.suggestion = $('#fb_sug').value;
+    openFeedback(b.dataset.fbt);
+  });
+
+  if (tab === 'form') {
+    const f = S.fb;
+    openSheet(`${header}<p class="mu">Khảo sát nhanh (~45 giây) sau khi bạn dùng thử Web App để nhóm hoàn thiện bản pitch Shark Tank.</p>
+    <div class="field"><label>Tên của bạn (không bắt buộc)</label><input class="input" id="fb_name" value="${esc(f.tester_name)}" maxlength="40" placeholder="VD: Minh Quân (hoặc để trống)"></div>
+    <div class="field"><label>Bạn đang test trên thiết bị nào?</label><div class="seg" id="fb_dev">${FB_DEV.map(([k, l]) => `<button data-v="${k}" class="${f.device === k ? 'on' : ''}">${l}</button>`).join('')}</div></div>
+    <div class="field"><label>Chấm điểm trải nghiệm Web App (1 → 5 sao)</label><div class="card" style="padding:4px 12px">${FB_CRIT.map(([k, l]) => `<div class="star-row"><div class="star-lbl">${l}</div><div class="stars-pick" data-sk="${k}">${[1, 2, 3, 4, 5].map(n => `<button data-sv="${n}" class="${n <= f[k] ? 'on' : ''}">★</button>`).join('')}</div></div>`).join('')}</div></div>
+    <div class="field"><label>Điểm bạn thích nhất khi dùng thử? (chọn nhiều)</label><div class="fgrp" id="fb_fav">${FB_FEATS.map(t => `<button class="chip fchip ${f.fav_features.includes(t) ? 'sel' : ''}" data-v="${esc(t)}">${esc(t)}</button>`).join('')}</div></div>
+    <div class="field"><label>Trải nghiệm kỹ thuật thực tế</label><div class="fgrp" id="fb_iss">${FB_ISS.map(([k, l]) => `<button class="chip fchip ${f.issue_type === k ? 'sel' : ''}" data-v="${k}">${l}</button>`).join('')}</div></div>
+    <div class="field"><label>Góc nhìn "Shark" (giả sử bạn cầm 10 tỷ ảo)</label><p class="mu" style="margin-bottom:6px">Mức độ sẵn sàng rót vốn cho sản phẩm này ở thời điểm hiện tại?</p><div class="fgrp" id="fb_shk">${FB_SHARK.map(([k, l]) => `<button class="chip fchip ${f.shark_invest === k ? 'sel' : ''}" data-v="${k}">${l}</button>`).join('')}</div></div>
+    <div class="field"><label>💡 Đề xuất & Cải tiến</label><textarea class="input" id="fb_sug" rows="3" maxlength="600" placeholder="Điểm nào còn bất tiện hoặc bạn muốn nhóm sửa/bổ sung thêm gì?">${esc(f.suggestion)}</textarea></div>
+    <div class="fstick"><button class="btn" id="fb_go">🚀 Gửi đánh giá ngay</button></div>`);
+    bindTabs();
+    $('#fb_name').oninput = e => { f.tester_name = e.target.value; };
+    $('#fb_sug').oninput = e => { f.suggestion = e.target.value; };
+    document.querySelectorAll('#fb_dev button').forEach(b => b.onclick = () => { f.device = b.dataset.v; document.querySelectorAll('#fb_dev button').forEach(x => x.classList.toggle('on', x === b)); });
+    document.querySelectorAll('.stars-pick').forEach(g => g.querySelectorAll('button').forEach(b => b.onclick = () => {
+      const k = g.dataset.sk, v = +b.dataset.sv; f[k] = v;
+      g.querySelectorAll('button').forEach(x => x.classList.toggle('on', +x.dataset.sv <= v));
+    }));
+    document.querySelectorAll('#fb_fav .fchip').forEach(b => b.onclick = () => {
+      const v = b.dataset.v; f.fav_features = f.fav_features.includes(v) ? f.fav_features.filter(x => x !== v) : [...f.fav_features, v];
+      b.classList.toggle('sel');
+    });
+    document.querySelectorAll('#fb_iss .fchip').forEach(b => b.onclick = () => { f.issue_type = b.dataset.v; document.querySelectorAll('#fb_iss .fchip').forEach(x => x.classList.toggle('sel', x === b)); });
+    document.querySelectorAll('#fb_shk .fchip').forEach(b => b.onclick = () => { f.shark_invest = b.dataset.v; document.querySelectorAll('#fb_shk .fchip').forEach(x => x.classList.toggle('sel', x === b)); });
+    $('#fb_go').onclick = async () => {
+      const btn = $('#fb_go'); btn.disabled = true; btn.textContent = 'Đang gửi…';
+      try {
+        await api('feedback', 'POST', f);
+        S.fb = null; confetti(45); toast('Cảm ơn bạn đã góp ý! 🎉');
+        openFeedback('stats');
+      } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = '🚀 Gửi đánh giá ngay'; }
+    };
+    return;
+  }
+
+  openSheet(`${header}<div class="spin"></div>`);
+  bindTabs();
+  try {
+    const d = await api('feedback');
+    if (!$('#sheet-wrap').classList.contains('show')) return;
+    const avgKeys = [['ui', 'Giao diện (UI)'], ['ux', 'Độ mượt (UX)'], ['match', '5 thói quen'], ['eco', 'Hệ sinh thái'], ['overall', 'Tổng thể']];
+    const devLbl = Object.fromEntries(FB_DEV), issLbl = Object.fromEntries(FB_ISS), shkLbl = Object.fromEntries(FB_SHARK);
+    const mxFeat = Math.max(1, ...(d.top_features || []).map(x => x.count));
+    $('#sheet').innerHTML = `<div class="grab"></div>${header}
+    <div class="kpi">
+      <div class="stat"><b>${d.total}</b><span>Lượt đánh giá</span></div>
+      <div class="stat"><b>${d.total ? d.averages.overall + '/5' : '—'}</b><span>Điểm tổng thể</span></div>
+      <div class="stat"><b>${d.invest_ready_pct}%</b><span>Sẵn sàng rót vốn</span></div>
+      <div class="stat"><b>${d.smooth_pct}%</b><span>Chạy rất mượt</span></div>
+    </div>
+    <a class="btn coin" href="/api/feedback.csv" download="smart-roommate-feedback.csv">⬇️ Tải file Excel / CSV</a>
+    <button class="btn sm ghost" id="fb_copy" style="width:100%;margin-top:8px">📋 Copy link gửi form (#feedback)</button>
+    <h3 class="t">Điểm trung bình 5 tiêu chí</h3>
+    <div class="bars fb-bars">${avgKeys.map(([k, l]) => { const v = d.averages[k] || 0; return `<div class="br"><span>${l}</span><div><i style="width:${v / 5 * 100}%"></i></div><b>${v}/5</b></div>`; }).join('')}</div>
+    <h3 class="t">Tâm lý "Shark" (10 tỷ ảo)</h3>
+    <div class="bars fb-bars">${FB_SHARK.map(([k, l]) => { const v = d.by_shark[k] || 0; return `<div class="br"><span>${l}</span><div><i style="width:${d.total ? v / d.total * 100 : 0}%"></i></div><b>${v}</b></div>`; }).join('')}</div>
+    <h3 class="t">Tính năng được thích nhất</h3>
+    <div class="bars fb-bars">${d.top_features.length ? d.top_features.map(x => `<div class="br"><span>${esc(x.name)}</span><div><i style="width:${x.count / mxFeat * 100}%"></i></div><b>${x.count}</b></div>`).join('') : '<p class="mu">Chưa có dữ liệu.</p>'}</div>
+    <h3 class="t">Đề xuất & Cải tiến mới nhất</h3>
+    ${d.items.length ? d.items.map(it => `<div class="fb-item"><div class="row"><b class="grow">${esc(it.tester_name)}</b><span class="chip coin">${it.r_overall}★</span><span class="chip sky">${esc(devLbl[it.device] || it.device)}</span></div><div><span class="chip ok">${esc(issLbl[it.issue_type] || it.issue_type)}</span><span class="chip grape">${esc(shkLbl[it.shark_invest] || it.shark_invest)}</span></div>${it.suggestion ? `<p>“${esc(it.suggestion)}”</p>` : '<p class="mu" style="font-style:italic">Không ghi đề xuất thêm</p>'}</div>`).join('') : '<p class="mu">Chưa có lượt đánh giá nào. Gửi link #feedback để nhóm bạn trải nghiệm nhé!</p>'}`;
+    bindTabs();
+    $('#fb_copy').onclick = async () => {
+      const u = location.origin + '/#feedback';
+      try { await navigator.clipboard.writeText(u); toast('Đã copy link: ' + u); } catch (e) { toast(u); }
+    };
+  } catch (e) { toast(e.message); }
 }
 boot();

@@ -27,8 +27,8 @@ const FB_PITCH = [['viral', '🚀 Kéo user 0đ (viral ĐH)'], ['margin', '💵 
 const GFORM_URL = 'https://docs.google.com/forms/d/e/1FAIpQLScdrtJhaZqZPcbm23yuSHfcj3BnW_cLO5_iGEoHl1ubgLnuKw/viewform';
 const GSHEET_URL = 'https://docs.google.com/spreadsheets/d/1yyhkIJoekoE07vBuJdx3BTPCEeSwWZqS3ysyo1geUwU/edit';
 
-const S = { token: localStorage.getItem('rm_token'), user: null, tab: 'disc', deck: [], unis: [], filters: { min: 0, uni: '', area: '', house: '', prio: '', bud: '', tag: '', sleep: '', tidy: '', photo: '' }, last: null, busy: false, matches: [], matchesLoaded: false, unread: 0, svc: 'room', svcCache: {}, onb: null, fb: null, loaded: false };
-let chatTimer = null, pollTimer = null, pollBusy = false;
+const S = { token: localStorage.getItem('rm_token'), user: null, tab: 'disc', deck: [], unis: [], filters: { min: 0, uni: '', area: '', house: '', prio: '', bud: '', tag: '', sleep: '', tidy: '', photo: '' }, last: null, history: [], passedCount: 0, deckLoading: false, busy: false, matches: [], matchesLoaded: false, unread: 0, svc: 'room', svcCache: {}, onb: null, fb: null, loaded: false };
+let chatTimer = null, pollTimer = null, pollBusy = false, swipeChain = Promise.resolve(), deckReqId = 0;
 
 /* ---------- helpers ---------- */
 async function api(path, method = 'GET', body) {
@@ -92,7 +92,7 @@ async function boot() {
 }
 function logout(silent) {
   if (!silent && S.token) api('logout', 'POST').catch(() => { });
-  localStorage.removeItem('rm_token'); S.token = null; S.user = null; S.deck = []; S.loaded = false; S.matches = []; S.matchesLoaded = false; S.svcCache = {};
+  localStorage.removeItem('rm_token'); S.token = null; S.user = null; S.deck = []; S.history = []; S.passedCount = 0; S.deckLoading = false; S.loaded = false; S.matches = []; S.matchesLoaded = false; S.svcCache = {};
   clearInterval(pollTimer); closeChat(); closeSheet(); route();
 }
 function route() {
@@ -208,7 +208,7 @@ function onboarding(first, step = 0) {
     const btn = $('#o_next'), old = btn.textContent;
     btn.disabled = true; btn.textContent = 'Đang lưu…';
     try {
-      const d = await api('me', 'PUT', o); S.user = d.user; S.onb = null; S.deck = []; S.loaded = false;
+      const d = await api('me', 'PUT', o); S.user = d.user; S.onb = null; S.deck = []; S.history = []; S.loaded = false;
       toast(first ? 'Hồ sơ đã sẵn sàng! Bắt đầu quẹt thôi 🎉' : 'Đã lưu hồ sơ'); shell(S.user.onboarded && !first ? 'me' : 'disc');
     } catch (e) { $('#o_err').textContent = e.message; btn.disabled = false; btn.textContent = old; }
   };
@@ -244,15 +244,24 @@ async function refreshUnread() {
 }
 
 /* ---------- discover ---------- */
-async function loadDeck() {
-  const q = filterQuery();
-  const d = await api('discover?' + q); S.deck = d.candidates; S.unis = d.universities; S.areas = d.areas; S.loaded = true;
-  d.candidates.slice(0, 4).forEach(u => { if (u.photo) { const im = new Image(); im.src = u.photo; } });
+async function loadDeck(resetPass = false) {
+  const reqId = ++deckReqId;
+  S.deckLoading = true;
+  try {
+    const q = filterQuery(resetPass);
+    const d = await api('discover?' + q);
+    if (reqId !== deckReqId) return;
+    S.deck = d.candidates; S.unis = d.universities; S.areas = d.areas;
+    S.passedCount = d.passed_count ?? 0; S.loaded = true;
+    d.candidates.slice(0, 4).forEach(u => { if (u.photo) { const im = new Image(); im.src = u.photo; } });
+  } finally {
+    if (reqId === deckReqId) S.deckLoading = false;
+  }
 }
-async function renderDisc() {
+async function renderDisc(resetPass = false) {
   $('#main').innerHTML = `<div class="topbar"><div class="logo">🏠 Smart Roommate</div><div class="row" style="gap:6px;flex:none"><button class="filter-btn fb-btn" onclick="openFeedback('form')">⭐ Góp ý</button><button class="filter-btn" onclick="openFilters()">${FUNNEL}Bộ lọc${filterActive() ? `<span class="fb">${filterActive()}</span>` : ''}</button></div></div>
   <div class="dwrap"><div class="deck" id="deck"><div class="spin"></div></div><div class="acts" id="acts"></div></div>`;
-  if (!S.loaded) { try { await loadDeck(); } catch (e) { return toast(e.message); } }
+  if (!S.loaded || resetPass) { try { await loadDeck(resetPass); } catch (e) { return toast(e.message); } }
   drawDeck();
 }
 function ringSvg(n) {
@@ -280,8 +289,14 @@ function cardHTML(u, pos) {
 function drawDeck() {
   const deck = $('#deck'); if (!deck) return;
   if (!S.deck.length) {
-    deck.innerHTML = `<div class="empty"><div class="em">🎉</div><h2 class="t">Bạn đã xem hết rồi!</h2><p class="mu">Quay lại sau để gặp thêm bạn mới, hoặc xem lại những người đã bỏ qua.</p><br>
-    <button class="btn" onclick="resetPassed()">↺ Xem lại người đã bỏ qua</button>${filterActive() ? '<button class="btn ghost" style="margin-top:10px" onclick="S.filters={...FDEF};S.loaded=false;renderDisc()">Xóa bộ lọc</button>' : ''}</div>`;
+    if (S.deckLoading) { deck.innerHTML = '<div class="spin"></div>'; return; }
+    if (filterActive() && !S.passedCount) {
+      deck.innerHTML = `<div class="empty"><div class="em">🔍</div><h2 class="t">Chưa có hồ sơ khớp bộ lọc</h2><p class="mu">Không tìm thấy bạn nào đạt đủ các tiêu chí đang lọc. Bạn thử nới độ hợp tối thiểu hoặc bớt tiêu chí lọc nhé.</p><br>
+      <button class="btn" onclick="openFilters()">🎛️ Chỉnh lại bộ lọc</button><button class="btn ghost" style="margin-top:10px" onclick="S.filters={...FDEF};S.loaded=false;renderDisc(true)">✕ Xóa bộ lọc</button></div>`;
+    } else {
+      deck.innerHTML = `<div class="empty"><div class="em">🎉</div><h2 class="t">Bạn đã xem hết rồi!</h2><p class="mu">Quay lại sau để gặp thêm bạn mới, hoặc xem lại những người đã bỏ qua.</p><br>
+      <button class="btn" onclick="resetPassed()">↺ Xem lại người đã bỏ qua</button>${filterActive() ? '<button class="btn ghost" style="margin-top:10px" onclick="S.filters={...FDEF};S.loaded=false;renderDisc(true)">Xóa bộ lọc</button>' : ''}</div>`;
+    }
     $('#acts').innerHTML = ''; return;
   }
   deck.innerHTML = S.deck.slice(0, 3).map((u, i) => cardHTML(u, i)).reverse().join('');
@@ -336,6 +351,8 @@ function fly(kind, dx, dy) {
     return toast('Hôm nay bạn đã dùng hết 3 lượt Siêu thích ⭐');
   }
   const u = S.deck.shift(); S.last = u;
+  S.history.push({ user: u, kind }); if (S.history.length > 10) S.history.shift();
+  if (kind === 'pass') S.passedCount = (S.passedCount || 0) + 1;
   if (S.user?.counts) S.user.counts.swiped++;
   if (kind === 'super' && S.user) { S.user.super_left = Math.max(0, (S.user.super_left ?? 3) - 1); syncActs(); }
   el.classList.add('flying'); el.style.pointerEvents = 'none';
@@ -356,9 +373,9 @@ function fly(kind, dx, dy) {
     if (third) { third.classList.remove('s2'); third.classList.add('s1'); }
     if (S.deck[2]) deck.insertAdjacentHTML('afterbegin', cardHTML(S.deck[2], 2));
   } else if (!S.deck.length) {
-    setTimeout(() => { if (S.tab === 'disc' && !S.deck.length) drawDeck(); }, 220);
+    setTimeout(() => { if (S.tab === 'disc' && !S.deck.length && !S.deckLoading) drawDeck(); }, 220);
   }
-  commitSwipe(u, kind);
+  swipeChain = swipeChain.then(() => commitSwipe(u, kind)).catch(() => {});
 }
 async function commitSwipe(u, kind) {
   try {
@@ -366,6 +383,7 @@ async function commitSwipe(u, kind) {
     if (d.super_left !== undefined && S.user) { S.user.super_left = d.super_left; syncActs(); }
     if (d.matched) {
       S.last = null;
+      S.history = S.history.filter(x => x.user.id !== u.id);
       S.matches = [d.match, ...S.matches.filter(m => m.id !== d.match.id)];
       S.matchesLoaded = true;
       if (d.new && S.user?.counts) S.user.counts.matches++;
@@ -380,22 +398,57 @@ async function commitSwipe(u, kind) {
   }
 }
 async function undoSwipe() {
-  if (S.busy) return;
-  try {
-    const d = await api('undo', 'POST');
+  if (S.history.length) {
+    ++deckReqId;
+    const item = S.history.pop();
+    if (!S.deck.some(x => x.id === item.user.id)) S.deck.unshift(item.user);
     if (S.user?.counts) S.user.counts.swiped = Math.max(0, S.user.counts.swiped - 1);
-    if (d.super_left !== undefined && S.user) S.user.super_left = d.super_left;
-    S.deck.unshift(d.user); drawDeck(); toast('Đã hoàn tác');
-  } catch (e) { toast(e.message); }
+    if (item.kind === 'super' && S.user) S.user.super_left = Math.min(3, (S.user.super_left ?? 0) + 1);
+    if (item.kind === 'pass') S.passedCount = Math.max(0, (S.passedCount || 1) - 1);
+    drawDeck();
+    const top = topCard();
+    if (top && top.animate) top.animate([{ transform: 'translateX(-36px) scale(.95)', opacity: .55 }, { transform: 'none', opacity: 1 }], { duration: 170, easing: 'cubic-bezier(.2,1.3,.4,1)' });
+    toast('Đã hoàn tác ↺');
+    swipeChain = swipeChain.then(async () => {
+      try {
+        const d = await api('undo', 'POST');
+        if (d.super_left !== undefined && S.user) { S.user.super_left = d.super_left; syncActs(); }
+      } catch (e) {
+        S.deck = S.deck.filter(x => x.id !== item.user.id);
+        if (S.tab === 'disc') drawDeck();
+        toast(e.message);
+      }
+    });
+    return;
+  }
+  if (S.busy) return;
+  S.busy = true;
+  ++deckReqId;
+  swipeChain = swipeChain.then(async () => {
+    try {
+      const d = await api('undo', 'POST');
+      if (S.user?.counts) S.user.counts.swiped = Math.max(0, S.user.counts.swiped - 1);
+      if (d.super_left !== undefined && S.user) S.user.super_left = d.super_left;
+      if (!S.deck.some(x => x.id === d.user.id)) S.deck.unshift(d.user);
+      if (S.tab === 'disc') drawDeck();
+      toast('Đã hoàn tác ↺');
+    } catch (e) { toast(e.message); }
+    finally { S.busy = false; }
+  });
 }
-async function resetPassed() { await api('reset-swipes', 'POST'); S.loaded = false; renderDisc(); }
+async function resetPassed() {
+  S.history = S.history.filter(x => x.kind !== 'pass');
+  await swipeChain.catch(() => {});
+  await api('reset-swipes', 'POST'); S.loaded = false; renderDisc();
+}
 const FDEF = { min: 0, uni: '', area: '', house: '', prio: '', bud: '', tag: '', sleep: '', tidy: '', photo: '' };
 const BUDS = { a: ['Dưới 3 triệu', 0, 3], b: ['3 – 4 triệu', 3, 4], c: ['4 – 5 triệu', 4, 5], d: ['Trên 5 triệu', 5, 99] };
 const filterActive = () => Object.keys(FDEF).filter(k => S.filters[k] && S.filters[k] !== FDEF[k]).length;
-function filterQuery() {
+function filterQuery(resetPass = false) {
   const f = S.filters, q = new URLSearchParams();
   ['min', 'uni', 'area', 'house', 'prio', 'tag', 'sleep', 'tidy', 'photo'].forEach(k => { if (f[k]) q.set(k, f[k]); });
   if (f.bud) { q.set('blo', BUDS[f.bud][1]); q.set('bhi', BUDS[f.bud][2]); }
+  if (resetPass) q.set('reset_pass', '1');
   return q.toString();
 }
 const FUNNEL = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg>';
@@ -408,7 +461,7 @@ function openFilters() {
   ${grp('bud', '💰 Tiền thuê tối đa của họ', Object.entries(BUDS).map(([k, v]) => [k, v[0]]))}
   ${grp('house', '🏠 Loại nhà', HOUSES.map(h => [h[0], h[1] + ' ' + h[2]]))}
   ${grp('prio', '⭐ Họ ưu tiên', PRIOS.map(p => [p[0], p[1] + ' ' + p[2]]))}
-  ${grp('uni', '🎓 Trường', S.unis.map(u => [u, u]))}
+  ${grp('uni', '🎓 Trường', (S.unis || []).map(u => [u, u]))}
   ${grp('sleep', '🌙 Giờ giấc', [['early', 'Ngủ sớm, dậy sớm'], ['late', 'Cú đêm']])}
   ${grp('tidy', '🧹 Sạch sẽ', [['high', 'Người gọn gàng']])}
   ${grp('tag', '🎯 Sở thích', TAGS.map(t => [t, t]))}
@@ -419,8 +472,8 @@ function openFilters() {
     const k = g.dataset.g, v = b.dataset.v; F[k] = F[k] === v ? '' : v;
     g.querySelectorAll('.fchip').forEach(x => x.classList.toggle('sel', x.dataset.v === F[k]));
   }));
-  $('#f_clear').onclick = () => { S.filters = { ...FDEF }; S.loaded = false; closeSheet(); renderDisc(); };
-  $('#f_ok').onclick = () => { S.filters = F; S.loaded = false; closeSheet(); renderDisc(); };
+  $('#f_clear').onclick = () => { S.filters = { ...FDEF }; S.history = S.history.filter(x => x.kind !== 'pass'); S.loaded = false; closeSheet(); renderDisc(true); };
+  $('#f_ok').onclick = () => { S.filters = F; S.history = S.history.filter(x => x.kind !== 'pass'); S.loaded = false; closeSheet(); renderDisc(true); };
 }
 function openDetail(u, actions = true) {
   if (!u) return; const cp = u.compat;
@@ -634,22 +687,30 @@ function radar(h) {
 }
 function drawMe() {
   const u = S.user; if (!u || S.tab !== 'me') return;
-  $('#main').innerHTML = `<div class="view" style="padding-top:14px">
+  const prevScroll = $('#meview')?.scrollTop || 0;
+  $('#main').innerHTML = `<div class="view" id="meview" style="padding-top:14px">
   <div class="phero c${u.color}">${avBig(u, 96)}<h2>${esc(u.name)}, ${u.age}</h2><div style="font-size:13px;font-weight:700;opacity:.92">🎓 ${esc(u.university || 'Chưa chọn trường')} · 📍 ${esc(u.area || '—')}</div>
   ${u.guest ? '<div style="margin-top:8px;font-size:12px;font-weight:800;background:rgba(27,26,58,.45);border:2px solid rgba(255,255,255,.7);border-radius:999px;padding:5px 12px;display:inline-block">Tài khoản dùng thử</div>' : ''}</div>
-  <div class="statrow"><div class="stat"><b>${u.counts.swiped}</b><span>Đã quẹt</span></div><div class="stat"><b>${u.counts.matches}</b><span>Match</span></div><div class="stat"><b>${u.liked_me}</b><span>Thích bạn</span></div></div>
+  <div class="statrow"><div class="stat"><b id="me_swiped">${u.counts.swiped}</b><span>Đã quẹt</span></div><div class="stat"><b id="me_matches">${u.counts.matches}</b><span>Match</span></div><div class="stat"><b id="me_liked">${u.liked_me}</b><span>Thích bạn</span></div></div>
   <div class="card"><b>Chân dung sinh hoạt</b>${radar(u.habits)}<div style="margin-top:6px">${u.tags.map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div><p class="mu" style="margin-top:6px">💰 Tiền thuê tối đa ${u.budget_max} triệu/người/tháng · ${HNAME[u.house_type]} · ưu tiên ${PNAME[u.priority].toLowerCase()}</p></div>
   <button class="btn" onclick="S.onb=null;onboarding(false,0)">✏️ Chỉnh sửa hồ sơ & thói quen</button>
-  <button class="btn ghost" style="margin-top:10px" onclick="openOrders()">🧾 Đơn của tôi (${u.counts.orders})</button>
+  <button class="btn ghost" style="margin-top:10px" onclick="openOrders()">🧾 Đơn của tôi (<span id="me_orders">${u.counts.orders}</span>)</button>
   <button class="btn coin" style="margin-top:10px" onclick="openFeedback('form')">📝 Đánh giá & Thống kê khảo sát</button>
   <button class="btn grape" style="margin-top:10px" onclick="openPartner()">📊 Bảng điều khiển đối tác (B2B)</button>
   <button class="btn ghost" style="margin-top:10px;color:var(--bad)" onclick="logout()">Đăng xuất</button><div style="height:10px"></div></div>`;
+  if (prevScroll && $('#meview')) $('#meview').scrollTop = prevScroll;
 }
 async function renderMe() {
   drawMe();
   try {
     const d = await api('me'); S.user = d.user;
-    if (S.tab === 'me') drawMe();
+    if (S.tab !== 'me') return;
+    if ($('#meview')) {
+      if ($('#me_swiped')) $('#me_swiped').textContent = S.user.counts.swiped;
+      if ($('#me_matches')) $('#me_matches').textContent = S.user.counts.matches;
+      if ($('#me_liked')) $('#me_liked').textContent = S.user.liked_me;
+      if ($('#me_orders')) $('#me_orders').textContent = S.user.counts.orders;
+    } else drawMe();
   } catch (e) { }
 }
 async function openOrders() {

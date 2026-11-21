@@ -1322,6 +1322,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def discover(self, c, me, q):
         uid = me["id"]
+        if q.get("reset_pass") == "1":
+            c.execute("DELETE FROM swipes WHERE from_id=? AND kind='pass'", (uid,))
         try:
             min_score = int(q.get("min", 0) or 0)
             blo = float(q["blo"]) if q.get("blo") else None
@@ -1375,7 +1377,8 @@ class Handler(BaseHTTPRequestHandler):
         meta = c.execute("SELECT id, university, area FROM users WHERE onboarded=1").fetchall()
         unis = sorted({r["university"] for r in meta if r["university"]})
         areas = sorted({r["area"] for r in meta if r["area"] and r["id"] != uid})
-        return {"candidates": out[:40], "total": len(out), "universities": unis, "areas": areas}
+        passed_cnt = int(c.execute("SELECT COUNT(*) n FROM swipes WHERE from_id=? AND kind='pass'", (uid,)).fetchone()["n"] or 0)
+        return {"candidates": out[:40], "total": len(out), "universities": unis, "areas": areas, "passed_count": passed_cnt}
 
     def swipe(self, c, me, b):
         uid = me["id"]
@@ -1421,17 +1424,23 @@ class Handler(BaseHTTPRequestHandler):
         return {"matched": True, "match": mp, "new": created, **res_extra}
 
     def undo(self, c, me):
-        row = c.execute("SELECT * FROM swipes WHERE from_id=? ORDER BY created DESC LIMIT 1", (me["id"],)).fetchone()
+        uid = me["id"]
+        row = c.execute(
+            "SELECT s.from_id, s.to_id, s.kind AS _skind,"
+            " EXISTS(SELECT 1 FROM matches m WHERE (m.a=s.from_id AND m.b=s.to_id) OR (m.a=s.to_id AND m.b=s.from_id)) AS _matched,"
+            " u.*"
+            " FROM swipes s JOIN users u ON u.id=s.to_id"
+            " WHERE s.from_id=? ORDER BY s.created DESC LIMIT 1",
+            (uid,),
+        ).fetchone()
         if not row:
             raise Err(400, "Không có gì để hoàn tác")
-        a, b = sorted((row["from_id"], row["to_id"]))
-        if c.execute("SELECT 1 FROM matches WHERE a=? AND b=?", (a, b)).fetchone():
+        if row["_matched"]:
             raise Err(400, "Đã match rồi, không thể hoàn tác")
         c.execute("DELETE FROM swipes WHERE from_id=? AND to_id=?", (row["from_id"], row["to_id"]))
-        other = c.execute("SELECT * FROM users WHERE id=?", (row["to_id"],)).fetchone()
-        res = {"user": user_row_to_dict(other, me)}
-        if row["kind"] == "super":
-            used = int(c.execute("SELECT COUNT(*) n FROM swipes WHERE from_id=? AND kind='super' AND created>?", (me["id"], time.time() - 86400)).fetchone()["n"] or 0)
+        res = {"user": user_row_to_dict(row, me)}
+        if row["_skind"] == "super":
+            used = int(c.execute("SELECT COUNT(*) n FROM swipes WHERE from_id=? AND kind='super' AND created>?", (uid, time.time() - 86400)).fetchone()["n"] or 0)
             res["super_left"] = max(0, SUPER_DAILY - used)
         return res
 

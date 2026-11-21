@@ -269,13 +269,17 @@ input[type=range]::-moz-range-thumb{width:22px;height:22px;border-radius:50%;bac
 .svc{display:flex;gap:12px;align-items:center}
 .svc .ic{width:52px;height:52px;border-radius:16px;background:var(--coin3);border:2px solid var(--ink);box-shadow:var(--sh-sm);display:grid;place-items:center;font-size:26px;flex:none}
 .ticket{display:flex;background:var(--card);border:var(--stroke);border-radius:20px;box-shadow:var(--sh-chunky);overflow:hidden;margin-bottom:13px}
-.tk-left{width:94px;flex:none;border-right:var(--stroke);padding:12px 6px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:3px}
+.tk-left{width:84px;flex:none;border-right:var(--stroke);padding:12px 6px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:3px}
 .tk-left .tk-ic{font-size:34px;line-height:1.1}
 .tk-left .tk-val{font-family:var(--num);font-weight:400;font-size:21px;line-height:1;color:var(--ink)}
 .tk-left .tk-unit{font-size:10.5px;font-weight:900;color:var(--ink7);line-height:1.1}
 .tk-coin{background:var(--coin)}.tk-grape{background:var(--grape3)}.tk-orange{background:var(--orange3)}.tk-sky{background:var(--sky3)}.tk-green{background:var(--green3)}
-.tk-right{flex:1;min-width:0;padding:12px 13px;display:flex;flex-direction:column;gap:4px}
+.tk-right{flex:1;min-width:0;padding:11px 12px;display:flex;flex-direction:column;gap:4px}
 .tk-title{font-family:var(--display);font-weight:800;font-size:16px;line-height:1.2;color:var(--ink)}
+.ticket .row{flex-wrap:wrap;gap:6px 8px;justify-content:space-between}
+.ticket .price{font-size:16.5px;line-height:1.15}
+.ticket .price .mu{display:block;font-family:var(--body);font-size:11px;font-weight:800;line-height:1.2}
+.ticket .btn.sm{flex:none;white-space:nowrap;padding:7px 11px;font-size:12.5px}
 .price{font-family:var(--num);font-weight:400;color:var(--green7);font-size:18px;letter-spacing:.2px}
 .stars{color:var(--coin7);font-weight:900;font-size:12.5px}
 

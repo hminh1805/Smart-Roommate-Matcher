@@ -18,9 +18,11 @@ import sqlite3
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, "static")
@@ -33,6 +35,64 @@ if not IS_PG:
 if IS_PG:
     import psycopg
     from psycopg.rows import dict_row
+
+GFORM_ID = os.environ.get("GFORM_ID", "1FAIpQLScdrtJhaZqZPcbm23yuSHfcj3BnW_cLO5_iGEoHl1ubgLnuKw").strip()
+GSHEET_ID = os.environ.get("GSHEET_ID", "1yyhkIJoekoE07vBuJdx3BTPCEeSwWZqS3ysyo1geUwU").strip()
+GFORM_VIEW_URL = f"https://docs.google.com/forms/d/e/{GFORM_ID}/viewform" if GFORM_ID else ""
+GFORM_POST_URL = os.environ.get(
+    "GFORM_POST_URL",
+    f"https://docs.google.com/forms/d/e/{GFORM_ID}/formResponse" if GFORM_ID else "",
+).strip()
+GSHEET_EDIT_URL = f"https://docs.google.com/spreadsheets/d/{GSHEET_ID}/edit" if GSHEET_ID else ""
+GSHEET_CSV_URL = os.environ.get(
+    "GSHEET_CSV_URL",
+    f"https://docs.google.com/spreadsheets/d/{GSHEET_ID}/export?format=csv" if GSHEET_ID else "",
+).strip()
+GSHEET_XLSX_URL = os.environ.get(
+    "GSHEET_XLSX_URL",
+    f"https://docs.google.com/spreadsheets/d/{GSHEET_ID}/export?format=xlsx" if GSHEET_ID else "",
+).strip()
+
+GFORM_DEV = {
+    "mobile": "📱 Điện thoại",
+    "desktop": "💻 Laptop / Máy tính bảng",
+    "both": "📱💻 Cả hai",
+}
+GFORM_STAR = {
+    1: "1 ★ (Chưa ổn)",
+    2: "2 ★",
+    3: "3 ★",
+    4: "4 ★",
+    5: "5 ★ (Rất ổn)",
+}
+GFORM_FEAT_PAIRS = [
+    ("Quẹt kiểu Tinder mượt mà", "Quẹt kiểu Tinder mượt mà, giao diện đẹp"),
+    ("Chấm % & 5 ô thói quen", "Chấm % hợp nhau & 5 ô so sánh thói quen rõ ràng"),
+    ("Bộ lọc 10 nhóm + Ảnh thật", "Bộ lọc 10 nhóm tiêu chí + Ảnh thật"),
+    ("Match + Gợi ý phòng trọ", "Màn hình Match kèm gợi ý phòng trọ gần trường"),
+    ("Chat + Gợi ý mở lời", "Nhắn tin trực tiếp + câu gợi ý mở lời thông minh"),
+    ("Xe chuyển · Dọn dẹp · Đồ cũ", "Đặt xe chuyển đồ, dọn phòng, đồ cũ 1 chạm"),
+    ("Miễn phí 0đ sinh viên", "Miễn phí 0đ hoàn toàn cho sinh viên"),
+]
+GFORM_FEAT_TO_FULL = dict(GFORM_FEAT_PAIRS)
+GFORM_ISS = {
+    "smooth": "✅ Chạy rất mượt, không gặp lỗi gì",
+    "lag": "🐢 Hơi chậm / lag nhẹ ở một số màn hình",
+    "ui_bug": "🎨 Có chỗ hiển thị bị lệch / đè chữ",
+    "func_bug": "⚙️ Gặp lỗi chức năng (quẹt / chat / đăng nhập)",
+}
+GFORM_SHARK = {
+    "strong": "💰 Đầu tư mạnh tay (từ 3 tỷ ảo trở lên)",
+    "explore": "💡 Sẵn sàng thăm dò (1 – 2 tỷ ảo)",
+    "consider": "🤔 Cân nhắc thêm nếu cải tiến rõ ràng hơn",
+    "no": "⏸️ Chưa sẵn sàng đầu tư",
+}
+GFORM_PITCH = {
+    "viral": "Chứng minh rõ hơn cách kéo người dùng mới (chi phí 0đ – viral trường ĐH)",
+    "margin": "Làm rõ biên lợi nhuận & cam kết từ chủ trọ / đối tác xe chuyển",
+    "safety": "Cách chống tài khoản ảo & giữ an toàn cho sinh viên khi ở ghép",
+    "scale": "Lộ trình mở rộng ra nhiều trường ĐH trong 6–12 tháng",
+}
 
 HABITS = ["sleep", "tidy", "money", "noise", "guest"]
 WEIGHTS = {"sleep": 1.5, "tidy": 1.5, "money": 1.5, "noise": 1.0, "guest": 1.0}
@@ -56,6 +116,9 @@ SUPER_DAILY = 3
 _PG_POOL = queue.LifoQueue(maxsize=8)
 _AUTH_CACHE = {}
 _AUTH_LOCK = threading.Lock()
+_GSHEET_LOCK = threading.Lock()
+_GSHEET_CACHE = {"ts": 0.0, "rows": [], "ok": False}
+_RECENT_SYNCED = []
 _ROOMS_CACHE = []
 _SERVICES_CACHE = {}
 _STATIC_CACHE = {}
@@ -223,7 +286,8 @@ CREATE TABLE IF NOT EXISTS feedback(
   device TEXT DEFAULT 'mobile', r_ui INTEGER DEFAULT 5, r_ux INTEGER DEFAULT 5,
   r_match INTEGER DEFAULT 5, r_eco INTEGER DEFAULT 5, r_overall INTEGER DEFAULT 5,
   fav_features TEXT DEFAULT '[]', issue_type TEXT DEFAULT 'smooth',
-  shark_invest TEXT DEFAULT 'explore', suggestion TEXT DEFAULT '', created REAL);
+  shark_invest TEXT DEFAULT 'explore', pitch_closer TEXT DEFAULT '',
+  suggestion TEXT DEFAULT '', synced INTEGER DEFAULT 0, created REAL);
 CREATE INDEX IF NOT EXISTS ix_feedback_created ON feedback(created);
 CREATE INDEX IF NOT EXISTS ix_msg ON messages(match_id,id);
 CREATE INDEX IF NOT EXISTS ix_swipes_to ON swipes(to_id,from_id);
@@ -325,6 +389,14 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN priority TEXT DEFAULT 'cheap'")
     if "photo_v" not in cols:
         c.execute("ALTER TABLE users ADD COLUMN photo_v INTEGER DEFAULT 0")
+    if not IS_PG:
+        fb_cols = {r["name"] for r in c.execute("PRAGMA table_info(feedback)").fetchall()}
+    else:
+        fb_cols = {r["column_name"] for r in c.execute("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='feedback'").fetchall()}
+    if "pitch_closer" not in fb_cols:
+        c.execute("ALTER TABLE feedback ADD COLUMN pitch_closer TEXT DEFAULT ''")
+    if "synced" not in fb_cols:
+        c.execute("ALTER TABLE feedback ADD COLUMN synced INTEGER DEFAULT 0")
     c.execute(f"CREATE TABLE IF NOT EXISTS photos(user_id INTEGER PRIMARY KEY, data {'BYTEA' if IS_PG else 'BLOB'})")
     fresh = not c.execute("SELECT 1 FROM users WHERE is_bot=1").fetchone()
     if fresh:
@@ -639,6 +711,272 @@ def apply_profile(c, uid, p):
     c.execute(f"UPDATE users SET {sets} WHERE id=?", (*fields.values(), uid))
 
 
+GFORM_FEAT_FROM_FULL = {full: short for short, full in GFORM_FEAT_PAIRS}
+
+
+def _parse_sheet_ts(raw):
+    s = str(raw or "").strip()
+    if not s:
+        return 0.0
+    tz = timezone(timedelta(hours=7))
+    for fmt in (
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=tz).timestamp()
+        except ValueError:
+            pass
+    return 0.0
+
+
+def _parse_sheet_star(raw):
+    m = re.search(r"[1-5]", str(raw or ""))
+    return int(m.group(0)) if m else 0
+
+
+def _parse_sheet_favs(raw):
+    s = str(raw or "")
+    if not s:
+        return []
+    out = []
+    # Match known phrases directly instead of splitting on commas, since two Google Form options contain commas.
+    for short_lbl, full_lbl in GFORM_FEAT_PAIRS:
+        if full_lbl in s or short_lbl in s:
+            out.append(short_lbl)
+    return out
+
+
+def _norm_favs_list(raw):
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw or "[]")
+        except Exception:
+            return _parse_sheet_favs(raw)
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for x in raw[:7]:
+        s = clean_text(x, 80)
+        s = GFORM_FEAT_FROM_FULL.get(s, s)
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+def _parse_sheet_device(raw):
+    s = str(raw or "").lower()
+    if "cả hai" in s or "both" in s:
+        return "both"
+    if "laptop" in s or "máy tính" in s or "desktop" in s or "pc" in s:
+        return "desktop"
+    return "mobile"
+
+
+def _parse_sheet_issue(raw):
+    s = str(raw or "").lower()
+    if "lỗi chức năng" in s or "func_bug" in s:
+        return "func_bug"
+    if "lệch" in s or "đè chữ" in s or "hiển thị" in s or "ui_bug" in s:
+        return "ui_bug"
+    if "lag" in s or "chậm" in s:
+        return "lag"
+    return "smooth"
+
+
+def _parse_sheet_shark(raw):
+    s = str(raw or "").lower()
+    if "mạnh" in s or "3 tỷ" in s or "strong" in s:
+        return "strong"
+    if "chưa sẵn sàng" in s or "chưa đầu tư" in s or s.strip() == "no":
+        return "no"
+    if "cân nhắc" in s or "consider" in s:
+        return "consider"
+    return "explore"
+
+
+def _parse_sheet_pitch(raw):
+    s = str(raw or "").lower()
+    if not s.strip():
+        return ""
+    if "kéo người dùng" in s or "0đ" in s or "viral" in s:
+        return "viral"
+    if "biên lợi nhuận" in s or "đối tác" in s or "margin" in s:
+        return "margin"
+    if "chống tài khoản ảo" in s or "an toàn" in s or "safety" in s:
+        return "safety"
+    if "mở rộng" in s or "6–12" in s or "6-12" in s or "scale" in s:
+        return "scale"
+    return ""
+
+
+def _fb_fingerprint(r):
+    return (
+        (r.get("tester_name") or "Ẩn danh").strip(),
+        r.get("device") or "mobile",
+        int(r.get("r_ui") or 0),
+        int(r.get("r_ux") or 0),
+        int(r.get("r_match") or 0),
+        int(r.get("r_eco") or 0),
+        int(r.get("r_overall") or 0),
+        r.get("issue_type") or "smooth",
+        r.get("shark_invest") or "explore",
+        (r.get("suggestion") or "").strip(),
+    )
+
+
+def _fetch_gsheet_rows(force=False):
+    if not GSHEET_CSV_URL:
+        return []
+    now = time.time()
+    with _GSHEET_LOCK:
+        if not force and _GSHEET_CACHE["ok"] and now - _GSHEET_CACHE["ts"] < 15.0:
+            return [dict(r) for r in _GSHEET_CACHE["rows"]]
+    try:
+        req = urllib.request.Request(GSHEET_CSV_URL, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read()
+        ct = (resp.headers.get("Content-Type") or "").lower()
+        if "text/html" in ct and raw.lstrip()[:1] == b"<":
+            raise ValueError("Google Sheet returned HTML instead of public CSV")
+        text = raw.decode("utf-8-sig", errors="replace")
+        reader = csv.reader(io.StringIO(text))
+        header = next(reader, None)
+        if not header:
+            rows = []
+        else:
+            col = {}
+            for i, h in enumerate(header):
+                hl = (h or "").strip().lower()
+                if "thời gian" in hl or "timestamp" in hl:
+                    col.setdefault("ts", i)
+                elif "tên" in hl or "biệt danh" in hl:
+                    col.setdefault("name", i)
+                elif "thiết bị" in hl:
+                    col.setdefault("device", i)
+                elif "giao diện" in hl or "(ui)" in hl:
+                    col.setdefault("r_ui", i)
+                elif "độ mượt" in hl or "(ux)" in hl:
+                    col.setdefault("r_ux", i)
+                elif "5 thói quen" in hl or "quẹt tinder" in hl:
+                    col.setdefault("r_match", i)
+                elif "hệ sinh thái" in hl:
+                    col.setdefault("r_eco", i)
+                elif "tổng thể" in hl:
+                    col.setdefault("r_overall", i)
+                elif "thích nhất" in hl:
+                    col.setdefault("fav", i)
+                elif "kỹ thuật" in hl:
+                    col.setdefault("issue", i)
+                elif "shark" in hl or "10 tỷ" in hl:
+                    col.setdefault("shark", i)
+                elif "câu chốt" in hl:
+                    col.setdefault("pitch", i)
+                elif "đề xuất" in hl or "cải tiến" in hl:
+                    col.setdefault("suggestion", i)
+            get = lambda r, k: (r[col[k]].strip() if k in col and col[k] < len(r) else "")
+            parsed = []
+            for idx, r in enumerate(reader, start=1):
+                if not any((x or "").strip() for x in r):
+                    continue
+                stars = [
+                    _parse_sheet_star(get(r, "r_ui")),
+                    _parse_sheet_star(get(r, "r_ux")),
+                    _parse_sheet_star(get(r, "r_match")),
+                    _parse_sheet_star(get(r, "r_eco")),
+                    _parse_sheet_star(get(r, "r_overall")),
+                ]
+                if not any(stars):
+                    continue
+                r_ui, r_ux, r_match, r_eco, r_overall = [s or 5 for s in stars]
+                parsed.append({
+                    "id": f"gs-{idx}",
+                    "tester_name": clean_text(get(r, "name"), 40) or "Ẩn danh",
+                    "device": _parse_sheet_device(get(r, "device")),
+                    "r_ui": r_ui,
+                    "r_ux": r_ux,
+                    "r_match": r_match,
+                    "r_eco": r_eco,
+                    "r_overall": r_overall,
+                    "fav_features": _parse_sheet_favs(get(r, "fav")),
+                    "issue_type": _parse_sheet_issue(get(r, "issue")),
+                    "shark_invest": _parse_sheet_shark(get(r, "shark")),
+                    "pitch_closer": _parse_sheet_pitch(get(r, "pitch")),
+                    "suggestion": clean_text(get(r, "suggestion"), 600),
+                    "created": _parse_sheet_ts(get(r, "ts")) or float(idx),
+                    "source": "sheet",
+                })
+            parsed.reverse()
+            rows = parsed
+        with _GSHEET_LOCK:
+            _GSHEET_CACHE["ts"] = time.time()
+            _GSHEET_CACHE["rows"] = [dict(r) for r in rows]
+            _GSHEET_CACHE["ok"] = True
+        return rows
+    except Exception as e:
+        sys.stderr.write(f"GSheet fetch error: {e}\n")
+        with _GSHEET_LOCK:
+            return [dict(r) for r in _GSHEET_CACHE["rows"]]
+
+
+def _post_to_gform(row):
+    if not GFORM_POST_URL:
+        return False
+    pairs = [
+        ("entry.625760835", "" if row["tester_name"] == "Ẩn danh" else row["tester_name"]),
+        ("entry.1776861047", GFORM_DEV.get(row["device"], GFORM_DEV["mobile"])),
+        ("entry.1776861047_sentinel", ""),
+        ("entry.1186649542", GFORM_STAR.get(row["r_ui"], GFORM_STAR[5])),
+        ("entry.1186649542_sentinel", ""),
+        ("entry.52005247", GFORM_STAR.get(row["r_ux"], GFORM_STAR[5])),
+        ("entry.52005247_sentinel", ""),
+        ("entry.2046561775", GFORM_STAR.get(row["r_match"], GFORM_STAR[5])),
+        ("entry.2046561775_sentinel", ""),
+        ("entry.1306876798", GFORM_STAR.get(row["r_eco"], GFORM_STAR[5])),
+        ("entry.1306876798_sentinel", ""),
+        ("entry.1160174372", GFORM_STAR.get(row["r_overall"], GFORM_STAR[5])),
+        ("entry.1160174372_sentinel", ""),
+        ("entry.765746675_sentinel", ""),
+    ]
+    for feat in row["fav_features"]:
+        pairs.append(("entry.765746675", GFORM_FEAT_TO_FULL.get(feat, feat)))
+    pairs.extend([
+        ("entry.1235497208", GFORM_ISS.get(row["issue_type"], GFORM_ISS["smooth"])),
+        ("entry.1235497208_sentinel", ""),
+        ("entry.338099251", GFORM_SHARK.get(row["shark_invest"], GFORM_SHARK["explore"])),
+        ("entry.338099251_sentinel", ""),
+        ("entry.816095684", row.get("suggestion") or ""),
+        ("fvv", "1"),
+        ("pageHistory", "0"),
+        ("submissionTimestamp", "-1"),
+    ])
+    pitch = row.get("pitch_closer") or ""
+    if pitch in GFORM_PITCH:
+        pairs.append(("entry.1802690077", GFORM_PITCH[pitch]))
+        pairs.append(("entry.1802690077_sentinel", ""))
+    body = urlencode(pairs).encode("utf-8")
+    req = urllib.request.Request(
+        GFORM_POST_URL,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+            "User-Agent": "Mozilla/5.0",
+            "Referer": GFORM_VIEW_URL or GFORM_POST_URL,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return 200 <= resp.status < 300
+    except Exception as e:
+        sys.stderr.write(f"GForm forward error: {e}\n")
+        return False
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "RoommateMatcher/1.0"
     protocol_version = "HTTP/1.1"
@@ -712,6 +1050,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/feedback.csv" and method == "GET":
                 self.feedback_csv()
+                return
+            if path == "/api/feedback.xlsx" and method == "GET":
+                self.feedback_xlsx()
                 return
             if path.startswith("/api/"):
                 res = None
@@ -1188,63 +1529,120 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 raise Err(400, "Điểm đánh giá không hợp lệ")
             scores[k] = max(1, min(5, v))
-        raw_fav = b.get("fav_features")
-        favs = []
-        if isinstance(raw_fav, list):
-            for x in raw_fav[:7]:
-                s = clean_text(x, 60)
-                if s and s not in favs:
-                    favs.append(s)
+        favs = _norm_favs_list(b.get("fav_features"))
+        if not favs:
+            raise Err(400, "Vui lòng chọn ít nhất 1 điểm bạn thích nhất")
         issue = b.get("issue_type") if b.get("issue_type") in ("smooth", "lag", "ui_bug", "func_bug") else "smooth"
         shark = b.get("shark_invest") if b.get("shark_invest") in ("strong", "explore", "consider", "no") else "explore"
+        pitch_closer = b.get("pitch_closer") if b.get("pitch_closer") in GFORM_PITCH else ""
         suggestion = clean_text(b.get("suggestion"), 600)
+        now = time.time()
+        row_dict = {
+            "id": "pending",
+            "tester_name": tester_name,
+            "device": device,
+            "r_ui": scores["r_ui"],
+            "r_ux": scores["r_ux"],
+            "r_match": scores["r_match"],
+            "r_eco": scores["r_eco"],
+            "r_overall": scores["r_overall"],
+            "fav_features": favs,
+            "issue_type": issue,
+            "shark_invest": shark,
+            "pitch_closer": pitch_closer,
+            "suggestion": suggestion,
+            "created": now,
+            "source": "pending",
+        }
+        fp = _fb_fingerprint(row_dict)
+        sheet_rows = _fetch_gsheet_rows(force=False)
+        sheet_count = sum(1 for sr in sheet_rows if _fb_fingerprint(sr) == fp)
+        with _GSHEET_LOCK:
+            max_exp = max((e["expected"] for e in _RECENT_SYNCED if e["fp"] == fp and e["exp"] > now), default=0)
+        expected = max(sheet_count, max_exp) + 1
+        synced = _post_to_gform(row_dict)
         fid = c.insert_id(
-            "INSERT INTO feedback(user_id,tester_name,device,r_ui,r_ux,r_match,r_eco,r_overall,fav_features,issue_type,shark_invest,suggestion,created)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO feedback(user_id,tester_name,device,r_ui,r_ux,r_match,r_eco,r_overall,fav_features,issue_type,shark_invest,pitch_closer,suggestion,synced,created)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (uid, tester_name, device, scores["r_ui"], scores["r_ux"], scores["r_match"], scores["r_eco"], scores["r_overall"],
-             json.dumps(favs, ensure_ascii=False), issue, shark, suggestion, time.time()),
+             json.dumps(favs, ensure_ascii=False), issue, shark, pitch_closer, suggestion, 1 if synced else 0, now),
         )
-        return {"ok": True, "id": fid}
+        row_dict["id"] = f"pending-{fid}"
+        if synced:
+            with _GSHEET_LOCK:
+                _GSHEET_CACHE["ts"] = 0.0
+                _RECENT_SYNCED.append({"fp": fp, "expected": expected, "row": row_dict, "exp": now + 25.0})
+        return {"ok": True, "id": fid, "synced_to_google": bool(synced)}
 
-    def _feedback_rows(self, c):
-        return c.execute("SELECT * FROM feedback ORDER BY id DESC").fetchall()
+    def _all_feedback_rows(self, c, force_sheet=False):
+        sheet_rows = _fetch_gsheet_rows(force=force_sheet)
+        fp_counts = {}
+        for r in sheet_rows:
+            fp = _fb_fingerprint(r)
+            fp_counts[fp] = fp_counts.get(fp, 0) + 1
+        now = time.time()
+        pending = []
+        with _GSHEET_LOCK:
+            kept = []
+            for entry in _RECENT_SYNCED:
+                if entry["exp"] <= now:
+                    continue
+                if fp_counts.get(entry["fp"], 0) >= entry["expected"]:
+                    continue
+                kept.append(entry)
+                pending.append(dict(entry["row"]))
+            _RECENT_SYNCED[:] = kept
+        db_rows = []
+        for r in c.execute("SELECT * FROM feedback WHERE COALESCE(synced, 0) = 0 ORDER BY id DESC").fetchall():
+            d = dict(r)
+            d["fav_features"] = _norm_favs_list(d.get("fav_features"))
+            d["pitch_closer"] = d.get("pitch_closer") or ""
+            d["source"] = "db"
+            db_rows.append(d)
+        merged = pending + sheet_rows + db_rows
+        merged.sort(key=lambda r: float(r.get("created") or 0), reverse=True)
+        return merged
 
     def feedback_stats(self, c):
-        rows = self._feedback_rows(c)
+        rows = self._all_feedback_rows(c)
         n = len(rows)
         by_dev = {"mobile": 0, "desktop": 0, "both": 0}
         by_iss = {"smooth": 0, "lag": 0, "ui_bug": 0, "func_bug": 0}
         by_shk = {"strong": 0, "explore": 0, "consider": 0, "no": 0}
+        by_pitch = {"viral": 0, "margin": 0, "safety": 0, "scale": 0}
         sums = {"r_ui": 0, "r_ux": 0, "r_match": 0, "r_eco": 0, "r_overall": 0}
         feat_cnt = {}
         items = []
         for idx, r in enumerate(rows):
-            if r["device"] in by_dev:
+            if r.get("device") in by_dev:
                 by_dev[r["device"]] += 1
-            if r["issue_type"] in by_iss:
+            if r.get("issue_type") in by_iss:
                 by_iss[r["issue_type"]] += 1
-            if r["shark_invest"] in by_shk:
+            if r.get("shark_invest") in by_shk:
                 by_shk[r["shark_invest"]] += 1
+            if r.get("pitch_closer") in by_pitch:
+                by_pitch[r["pitch_closer"]] += 1
             for k in sums:
-                sums[k] += int(r[k] or 0)
-            favs = json.loads(r["fav_features"] or "[]")
+                sums[k] += int(r.get(k) or 0)
+            favs = r["fav_features"] if isinstance(r.get("fav_features"), list) else _norm_favs_list(r.get("fav_features"))
             for f in favs:
                 feat_cnt[f] = feat_cnt.get(f, 0) + 1
             if idx < 80:
                 items.append({
-                    "id": r["id"],
-                    "tester_name": r["tester_name"],
-                    "device": r["device"],
-                    "r_ui": int(r["r_ui"] or 0),
-                    "r_ux": int(r["r_ux"] or 0),
-                    "r_match": int(r["r_match"] or 0),
-                    "r_eco": int(r["r_eco"] or 0),
-                    "r_overall": int(r["r_overall"] or 0),
+                    "id": r.get("id"),
+                    "tester_name": r.get("tester_name") or "Ẩn danh",
+                    "device": r.get("device") or "mobile",
+                    "r_ui": int(r.get("r_ui") or 0),
+                    "r_ux": int(r.get("r_ux") or 0),
+                    "r_match": int(r.get("r_match") or 0),
+                    "r_eco": int(r.get("r_eco") or 0),
+                    "r_overall": int(r.get("r_overall") or 0),
                     "fav_features": favs,
-                    "issue_type": r["issue_type"],
-                    "shark_invest": r["shark_invest"],
-                    "suggestion": r["suggestion"] or "",
-                    "created": r["created"],
+                    "issue_type": r.get("issue_type") or "smooth",
+                    "shark_invest": r.get("shark_invest") or "explore",
+                    "pitch_closer": r.get("pitch_closer") or "",
+                    "suggestion": r.get("suggestion") or "",
+                    "created": r.get("created") or 0,
                 })
         avg = {
             "ui": round(sums["r_ui"] / n, 2) if n else 0,
@@ -1260,10 +1658,14 @@ class Handler(BaseHTTPRequestHandler):
             "by_device": by_dev,
             "by_issue": by_iss,
             "by_shark": by_shk,
+            "by_pitch": by_pitch,
             "invest_ready_pct": round((by_shk["strong"] + by_shk["explore"]) * 100 / n) if n else 0,
             "smooth_pct": round(by_iss["smooth"] * 100 / n) if n else 0,
             "top_features": top_features,
             "items": items,
+            "source": "google_sheet" if GSHEET_CSV_URL else "database",
+            "gform_url": GFORM_VIEW_URL,
+            "gsheet_url": GSHEET_EDIT_URL,
         }
 
     def feedback_csv(self):
@@ -1271,7 +1673,7 @@ class Handler(BaseHTTPRequestHandler):
         for attempt in (0, 1):
             c = db()
             try:
-                rows = self._feedback_rows(c)
+                rows = self._all_feedback_rows(c, force_sheet=True)
                 break
             except Exception as e:
                 if IS_PG and isinstance(e, (psycopg.OperationalError, psycopg.InterfaceError)):
@@ -1284,23 +1686,32 @@ class Handler(BaseHTTPRequestHandler):
         dev_map = {"mobile": "Điện thoại", "desktop": "Laptop / Máy tính bảng", "both": "Cả hai"}
         iss_map = {"smooth": "Chạy rất mượt", "lag": "Hơi lag nhẹ", "ui_bug": "Lỗi hiển thị", "func_bug": "Lỗi chức năng"}
         shk_map = {"strong": "Đầu tư mạnh (≥3 tỷ)", "explore": "Thăm dò (1-2 tỷ)", "consider": "Cân nhắc thêm", "no": "Chưa đầu tư"}
+        pitch_map = {
+            "viral": "Kéo user 0đ (viral ĐH)",
+            "margin": "Biên lợi nhuận & đối tác",
+            "safety": "Chống nick ảo & an toàn",
+            "scale": "Mở rộng 6–12 tháng",
+        }
         tz = timezone(timedelta(hours=7))
-        safe_cell = lambda s: ("'" + s) if s and s[0] in ("=", "+", "-", "@") else s
+        safe_cell = lambda s: ("'" + str(s)) if s and str(s)[0] in ("=", "+", "-", "@", "\t", "\r") else str(s or "")
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(["ID", "Thời gian (UTC+7)", "Người đánh giá", "Thiết bị", "Điểm UI", "Điểm UX",
                     "Chấm 5 thói quen", "Hệ sinh thái", "Tổng thể", "Tính năng thích",
-                    "Trải nghiệm kỹ thuật", "Mức độ đầu tư (10 tỷ ảo)", "Đề xuất & Cải tiến"])
+                    "Trải nghiệm kỹ thuật", "Mức độ đầu tư (10 tỷ ảo)", "Câu chốt Pitch", "Đề xuất & Cải tiến"])
         for r in rows:
-            ts = datetime.fromtimestamp(float(r["created"] or 0), tz).strftime("%Y-%m-%d %H:%M") if r["created"] else ""
-            favs = ", ".join(json.loads(r["fav_features"] or "[]"))
+            ts_val = float(r.get("created") or 0)
+            ts = datetime.fromtimestamp(ts_val, tz).strftime("%Y-%m-%d %H:%M") if ts_val > 1_000_000_000 else ""
+            fav_list = r["fav_features"] if isinstance(r.get("fav_features"), list) else _norm_favs_list(r.get("fav_features"))
+            favs = ", ".join(fav_list)
             w.writerow([
-                r["id"], ts, safe_cell(r["tester_name"] or ""),
-                dev_map.get(r["device"], r["device"]),
-                r["r_ui"], r["r_ux"], r["r_match"], r["r_eco"], r["r_overall"],
-                favs, iss_map.get(r["issue_type"], r["issue_type"]),
-                shk_map.get(r["shark_invest"], r["shark_invest"]),
-                safe_cell(r["suggestion"] or ""),
+                r.get("id", ""), ts, safe_cell(r.get("tester_name") or ""),
+                dev_map.get(r.get("device"), r.get("device") or ""),
+                r.get("r_ui", ""), r.get("r_ux", ""), r.get("r_match", ""), r.get("r_eco", ""), r.get("r_overall", ""),
+                favs, iss_map.get(r.get("issue_type"), r.get("issue_type") or ""),
+                shk_map.get(r.get("shark_invest"), r.get("shark_invest") or ""),
+                pitch_map.get(r.get("pitch_closer") or "", ""),
+                safe_cell(r.get("suggestion") or ""),
             ])
         data = ("\ufeff" + buf.getvalue()).encode("utf-8")
         self.send_response(200)
@@ -1310,6 +1721,25 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
+
+    def feedback_xlsx(self):
+        if GSHEET_XLSX_URL:
+            try:
+                req = urllib.request.Request(GSHEET_XLSX_URL, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = resp.read()
+                if len(data) > 100 and data[:2] == b"PK":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    self.send_header("Content-Disposition", 'attachment; filename="smart-roommate-feedback.xlsx"')
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+            except Exception as e:
+                sys.stderr.write(f"GSheet xlsx fetch error: {e}\n")
+        self.feedback_csv()
 
 
 def main():

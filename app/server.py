@@ -110,6 +110,13 @@ HABIT_ADVICE = {
 COMMISSION = {"room": 0.10, "truck": 0.12, "clean": 0.12, "used": 0.15}
 BOT_LIKE_THRESHOLD = 66
 SUPER_DAILY = 3
+VN_TZ = timezone(timedelta(hours=7))
+
+
+def fmt_vn_time(ts=None):
+    if ts is None:
+        ts = time.time()
+    return datetime.fromtimestamp(float(ts), VN_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ----------------------------------------------------------------- database & caches
@@ -272,22 +279,22 @@ CREATE TABLE IF NOT EXISTS users(
   bio TEXT DEFAULT '', age INTEGER DEFAULT 20, gender TEXT DEFAULT 'khac', pref_gender TEXT DEFAULT 'any',
   budget_min REAL DEFAULT 2, budget_max REAL DEFAULT 4, area TEXT DEFAULT '',
   sleep INTEGER DEFAULT 3, tidy INTEGER DEFAULT 3, money INTEGER DEFAULT 3, noise INTEGER DEFAULT 3, guest INTEGER DEFAULT 3,
-  tags TEXT DEFAULT '[]', is_bot INTEGER DEFAULT 0, onboarded INTEGER DEFAULT 0, created REAL);
-CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER, created REAL);
-CREATE TABLE IF NOT EXISTS swipes(from_id INTEGER, to_id INTEGER, kind TEXT, created REAL, PRIMARY KEY(from_id,to_id));
-CREATE TABLE IF NOT EXISTS matches(id INTEGER PRIMARY KEY AUTOINCREMENT, a INTEGER, b INTEGER, score INTEGER, created REAL, active INTEGER DEFAULT 1, UNIQUE(a,b));
-CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT, match_id INTEGER, sender INTEGER, text TEXT, created REAL, visible_at REAL, read INTEGER DEFAULT 0);
+  tags TEXT DEFAULT '[]', is_bot INTEGER DEFAULT 0, onboarded INTEGER DEFAULT 0, created REAL, created_real_time TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER, created REAL, created_real_time TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS swipes(from_id INTEGER, to_id INTEGER, kind TEXT, created REAL, created_real_time TEXT DEFAULT '', PRIMARY KEY(from_id,to_id));
+CREATE TABLE IF NOT EXISTS matches(id INTEGER PRIMARY KEY AUTOINCREMENT, a INTEGER, b INTEGER, score INTEGER, created REAL, created_real_time TEXT DEFAULT '', active INTEGER DEFAULT 1, UNIQUE(a,b));
+CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT, match_id INTEGER, sender INTEGER, text TEXT, created REAL, created_real_time TEXT DEFAULT '', visible_at REAL, read INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS rooms(id INTEGER PRIMARY KEY, name TEXT, price INTEGER, district TEXT, descr TEXT, near TEXT, dist TEXT, sponsored INTEGER, emoji TEXT, beds INTEGER, amenities TEXT, owner TEXT);
 CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY, kind TEXT, name TEXT, price INTEGER, unit TEXT, descr TEXT, rating REAL, jobs INTEGER, emoji TEXT, promoted INTEGER DEFAULT 0);
-CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, kind TEXT, item_id INTEGER, item_name TEXT, amount INTEGER, commission INTEGER, note TEXT, date TEXT, status TEXT DEFAULT 'new', created REAL);
-CREATE TABLE IF NOT EXISTS impressions(id INTEGER PRIMARY KEY AUTOINCREMENT, room_id INTEGER, user_id INTEGER, created REAL);
+CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, kind TEXT, item_id INTEGER, item_name TEXT, amount INTEGER, commission INTEGER, note TEXT, date TEXT, status TEXT DEFAULT 'new', created REAL, created_real_time TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS impressions(id INTEGER PRIMARY KEY AUTOINCREMENT, room_id INTEGER, user_id INTEGER, created REAL, created_real_time TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS feedback(
   id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, tester_name TEXT DEFAULT 'Ẩn danh',
   device TEXT DEFAULT 'mobile', r_ui INTEGER DEFAULT 5, r_ux INTEGER DEFAULT 5,
   r_match INTEGER DEFAULT 5, r_eco INTEGER DEFAULT 5, r_overall INTEGER DEFAULT 5,
   fav_features TEXT DEFAULT '[]', issue_type TEXT DEFAULT 'smooth',
   shark_invest TEXT DEFAULT 'explore', pitch_closer TEXT DEFAULT '',
-  suggestion TEXT DEFAULT '', synced INTEGER DEFAULT 0, created REAL);
+  suggestion TEXT DEFAULT '', synced INTEGER DEFAULT 0, created REAL, created_real_time TEXT DEFAULT '');
 CREATE INDEX IF NOT EXISTS ix_feedback_created ON feedback(created);
 CREATE INDEX IF NOT EXISTS ix_msg ON messages(match_id,id);
 CREATE INDEX IF NOT EXISTS ix_swipes_to ON swipes(to_id,from_id);
@@ -397,15 +404,28 @@ def init_db():
         c.execute("ALTER TABLE feedback ADD COLUMN pitch_closer TEXT DEFAULT ''")
     if "synced" not in fb_cols:
         c.execute("ALTER TABLE feedback ADD COLUMN synced INTEGER DEFAULT 0")
+    time_tables = ("users", "sessions", "swipes", "matches", "messages", "orders", "impressions", "feedback")
+    for tbl in time_tables:
+        if not IS_PG:
+            t_cols = {r["name"] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()}
+        else:
+            t_cols = {r["column_name"] for r in c.execute("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=?", (tbl,)).fetchall()}
+        if "created_real_time" not in t_cols:
+            c.execute(f"ALTER TABLE {tbl} ADD COLUMN created_real_time TEXT DEFAULT ''")
+        if IS_PG:
+            c.execute(f"UPDATE {tbl} SET created_real_time = to_char(to_timestamp(created) AT TIME ZONE 'Asia/Ho_Chi_Minh', 'YYYY-MM-DD HH24:MI:SS') WHERE (created_real_time IS NULL OR created_real_time = '') AND created IS NOT NULL AND created > 0")
+        else:
+            c.execute(f"UPDATE {tbl} SET created_real_time = strftime('%Y-%m-%d %H:%M:%S', created, 'unixepoch', '+7 hours') WHERE (created_real_time IS NULL OR created_real_time = '') AND created IS NOT NULL AND created > 0")
     c.execute(f"CREATE TABLE IF NOT EXISTS photos(user_id INTEGER PRIMARY KEY, data {'BYTEA' if IS_PG else 'BLOB'})")
     fresh = not c.execute("SELECT 1 FROM users WHERE is_bot=1").fetchone()
     if fresh:
         for i, b in enumerate(BOTS):
             n, e, g, age, uni, area, bmin, bmax, h, tags, bio = b
+            now = time.time()
             c.execute(
-                "INSERT INTO users(username,name,emoji,color,university,bio,age,gender,budget_min,budget_max,area,sleep,tidy,money,noise,guest,tags,is_bot,onboarded,created)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,?)",
-                (f"bot{i}", n, e, i % 8, uni, bio, age, g, bmin, bmax, area, *h, json.dumps(tags, ensure_ascii=False), time.time()),
+                "INSERT INTO users(username,name,emoji,color,university,bio,age,gender,budget_min,budget_max,area,sleep,tidy,money,noise,guest,tags,is_bot,onboarded,created,created_real_time)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,?,?)",
+                (f"bot{i}", n, e, i % 8, uni, bio, age, g, bmin, bmax, area, *h, json.dumps(tags, ensure_ascii=False), now, fmt_vn_time(now)),
             )
     if fresh or "house_type" not in cols:
         for r in c.execute("SELECT id,budget_max FROM users WHERE is_bot=1").fetchall():
@@ -557,8 +577,8 @@ def matches_public(c, me):
 
 
 def bot_say(c, match_id, bot_id, text, delay):
-    now = time.time()
-    c.execute("INSERT INTO messages(match_id,sender,text,created,visible_at) VALUES(?,?,?,?,?)", (match_id, bot_id, text, now + delay, now + delay))
+    t = time.time() + delay
+    c.execute("INSERT INTO messages(match_id,sender,text,created,created_real_time,visible_at) VALUES(?,?,?,?,?,?)", (match_id, bot_id, text, t, fmt_vn_time(t), t))
 
 
 def bot_reply(bot, text, uname):
@@ -609,7 +629,8 @@ def create_match(c, a_id, b_id, score):
     if row:
         c.execute("UPDATE matches SET active=1 WHERE id=?", (row["id"],))
         return c.execute("SELECT * FROM matches WHERE id=?", (row["id"],)).fetchone(), False
-    mid = c.insert_id("INSERT INTO matches(a,b,score,created) VALUES(?,?,?,?)", (a, b, score, time.time()))
+    now = time.time()
+    mid = c.insert_id("INSERT INTO matches(a,b,score,created,created_real_time) VALUES(?,?,?,?,?)", (a, b, score, now, fmt_vn_time(now)))
     return c.execute("SELECT * FROM matches WHERE id=?", (mid,)).fetchone(), True
 
 
@@ -617,11 +638,12 @@ def log_impressions(c, room_ids, user_id):
     if not room_ids:
         return
     now = time.time()
-    vals = ",".join("(?,?,?)" for _ in room_ids)
+    now_str = fmt_vn_time(now)
+    vals = ",".join("(?,?,?,?)" for _ in room_ids)
     params = []
     for rid in room_ids:
-        params.extend((rid, user_id, now))
-    c.execute(f"INSERT INTO impressions(room_id,user_id,created) VALUES {vals}", tuple(params))
+        params.extend((rid, user_id, now, now_str))
+    c.execute(f"INSERT INTO impressions(room_id,user_id,created,created_real_time) VALUES {vals}", tuple(params))
 
 
 def rooms_for(c, me, other, user_id, log=True):
@@ -1288,10 +1310,12 @@ class Handler(BaseHTTPRequestHandler):
                 if c.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
                     raise Err(409, "Tên đăng nhập đã tồn tại")
             salt = secrets.token_hex(16)
-            uid = c.insert_id("INSERT INTO users(username,salt,pw,name,color,created) VALUES(?,?,?,?,?,?)",
-                              (username, salt, hash_pw(pw, salt), name, random.randint(0, 7), time.time()))
+            now = time.time()
+            uid = c.insert_id("INSERT INTO users(username,salt,pw,name,color,created,created_real_time) VALUES(?,?,?,?,?,?,?)",
+                              (username, salt, hash_pw(pw, salt), name, random.randint(0, 7), now, fmt_vn_time(now)))
         tok = secrets.token_urlsafe(32)
-        c.execute("INSERT INTO sessions VALUES(?,?,?)", (tok, uid, time.time()))
+        now = time.time()
+        c.execute("INSERT INTO sessions(token,user_id,created,created_real_time) VALUES(?,?,?,?)", (tok, uid, now, fmt_vn_time(now)))
         me = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
         _cache_set_user(tok, me)
         return {"token": tok, "user": self.me_dict(c, me)}
@@ -1365,7 +1389,8 @@ class Handler(BaseHTTPRequestHandler):
         if kind == "pass":
             if to <= 0 or to == uid:
                 raise Err(404, "Không tìm thấy người dùng")
-            c.execute("INSERT INTO swipes(from_id,to_id,kind,created) VALUES(?,?,?,?) ON CONFLICT(from_id,to_id) DO UPDATE SET kind=excluded.kind, created=excluded.created", (uid, to, kind, time.time()))
+            now = time.time()
+            c.execute("INSERT INTO swipes(from_id,to_id,kind,created,created_real_time) VALUES(?,?,?,?,?) ON CONFLICT(from_id,to_id) DO UPDATE SET kind=excluded.kind, created=excluded.created, created_real_time=excluded.created_real_time", (uid, to, kind, now, fmt_vn_time(now)))
             return {"matched": False}
         other = c.execute("SELECT * FROM users WHERE id=? AND id!=?", (to, uid)).fetchone()
         if not other:
@@ -1376,7 +1401,8 @@ class Handler(BaseHTTPRequestHandler):
             if used >= SUPER_DAILY:
                 raise Err(429, f"Hôm nay bạn đã dùng hết {SUPER_DAILY} lượt Siêu thích ⭐")
             res_extra["super_left"] = max(0, SUPER_DAILY - (used + 1))
-        c.execute("INSERT INTO swipes(from_id,to_id,kind,created) VALUES(?,?,?,?) ON CONFLICT(from_id,to_id) DO UPDATE SET kind=excluded.kind, created=excluded.created", (uid, to, kind, time.time()))
+        now = time.time()
+        c.execute("INSERT INTO swipes(from_id,to_id,kind,created,created_real_time) VALUES(?,?,?,?,?) ON CONFLICT(from_id,to_id) DO UPDATE SET kind=excluded.kind, created=excluded.created, created_real_time=excluded.created_real_time", (uid, to, kind, now, fmt_vn_time(now)))
         score = compat(me, other)["score"]
         mutual = False
         if other["is_bot"]:
@@ -1430,7 +1456,7 @@ class Handler(BaseHTTPRequestHandler):
             text = clean_text(self.body().get("text"), 1000)
             if not text:
                 raise Err(400, "Tin nhắn trống")
-            c.execute("INSERT INTO messages(match_id,sender,text,created,visible_at) VALUES(?,?,?,?,?)", (mid, uid, text, now, now))
+            c.execute("INSERT INTO messages(match_id,sender,text,created,created_real_time,visible_at) VALUES(?,?,?,?,?,?)", (mid, uid, text, now, fmt_vn_time(now), now))
             if other["is_bot"]:
                 bot_say(c, mid, other_id, bot_reply(other, text, me["name"]), random.uniform(1.2, 2.8))
             return {"ok": True}
@@ -1474,8 +1500,9 @@ class Handler(BaseHTTPRequestHandler):
         else:
             raise Err(400, "Loại đơn không hợp lệ")
         com = int(round(base * COMMISSION[kind] / 1000) * 1000)
-        oid = c.insert_id("INSERT INTO orders(user_id,kind,item_id,item_name,amount,commission,note,date,created) VALUES(?,?,?,?,?,?,?,?,?)",
-                          (me["id"], kind, item_id, name, amount, com, clean_text(b.get("note"), 300), clean_text(b.get("date"), 30), time.time()))
+        now = time.time()
+        oid = c.insert_id("INSERT INTO orders(user_id,kind,item_id,item_name,amount,commission,note,date,created,created_real_time) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                          (me["id"], kind, item_id, name, amount, com, clean_text(b.get("note"), 300), clean_text(b.get("date"), 30), now, fmt_vn_time(now)))
         o = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
         return {"order": order_dict(o)}
 
@@ -1562,10 +1589,10 @@ class Handler(BaseHTTPRequestHandler):
         expected = max(sheet_count, max_exp) + 1
         synced = _post_to_gform(row_dict)
         fid = c.insert_id(
-            "INSERT INTO feedback(user_id,tester_name,device,r_ui,r_ux,r_match,r_eco,r_overall,fav_features,issue_type,shark_invest,pitch_closer,suggestion,synced,created)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO feedback(user_id,tester_name,device,r_ui,r_ux,r_match,r_eco,r_overall,fav_features,issue_type,shark_invest,pitch_closer,suggestion,synced,created,created_real_time)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (uid, tester_name, device, scores["r_ui"], scores["r_ux"], scores["r_match"], scores["r_eco"], scores["r_overall"],
-             json.dumps(favs, ensure_ascii=False), issue, shark, pitch_closer, suggestion, 1 if synced else 0, now),
+             json.dumps(favs, ensure_ascii=False), issue, shark, pitch_closer, suggestion, 1 if synced else 0, now, fmt_vn_time(now)),
         )
         row_dict["id"] = f"pending-{fid}"
         if synced:
